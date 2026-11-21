@@ -1,0 +1,6 @@
+{
+  "name": "LokaBio",
+  "description": "Platform BioLink modern untuk kreator dan profesional dengan kustomisasi tema real-time, pelacakan klik, analitik profil, dan SEO dinamis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
