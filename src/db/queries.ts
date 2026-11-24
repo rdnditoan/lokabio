@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from 'drizzle-orm';
 import { db } from './index.ts';
+import { adminAuth } from '../lib/firebase-admin.ts';
 import {
   adminAuditLogs,
   clickEvents,
@@ -8,8 +10,11 @@ import {
   links,
   platformSettings,
   profileReports,
+  promoCoupons,
+  proSubscriptionsLog,
   type SocialLinkItem,
   subscribers,
+  themeTemplates,
   type UserRecord,
   users,
   verificationRequests,
@@ -20,17 +25,22 @@ import {
   type AdminUserSummaryDTO,
   type AnalyticsSummaryDTO,
   type BulkUserAction,
+  type CuratedThemeTemplateDTO,
   findBlockedDomainMatch,
   isLinkScheduledActive,
   isUserProActive,
   normalizeUrl,
   type PlatformAnalyticsDTO,
+  type PlatformBackupDTO,
   type PlatformSettingsDTO,
   type PlatformStatsDTO,
   type ProfileReportDTO,
+  type PromoCouponDTO,
+  type ProSubscriptionLogDTO,
   type PublicLinkDTO,
   type PublicPlatformStatusDTO,
   sanitizeUsername,
+  THEME_PRESETS,
   type VerificationRequestDTO,
 } from '../shared/themes.ts';
 
@@ -140,6 +150,39 @@ export async function getOrCreateUser(
         .where(eq(users.id, existing[0].id))
         .returning();
       return touched[0] ?? existing[0];
+    }
+
+    const cleanAuthEmail = (email || '').trim().toLowerCase();
+    if (cleanAuthEmail) {
+      const preProvisioned = await db
+        .select()
+        .from(users)
+        .where(
+          and(
+            sql`lower(${users.email}) = ${cleanAuthEmail}`,
+            sql`${users.uid} like 'pre_%'`
+          )
+        )
+        .limit(1);
+
+      if (preProvisioned[0]) {
+        const claimed = await db
+          .update(users)
+          .set({
+            uid,
+            lastActiveAt: new Date(),
+            updatedAt: new Date(),
+            ...(photoUrl && !preProvisioned[0].avatarUrl
+              ? { avatarUrl: photoUrl }
+              : {}),
+            ...(isBootstrapAdminEmail(email)
+              ? { role: 'admin', planTier: 'pro' }
+              : {}),
+          })
+          .where(eq(users.id, preProvisioned[0].id))
+          .returning();
+        if (claimed[0]) return claimed[0];
+      }
     }
 
     const settings = await getOrCreatePlatformSettings();
@@ -2011,6 +2054,8 @@ export async function getAdminUserDetail(
         bio: u.bio,
         whatsappNumber: u.whatsappNumber,
         contactEmail: u.contactEmail,
+        seoTitle: u.seoTitle,
+        seoDescription: u.seoDescription,
       },
       links: userLinks.map((l) => {
         const matched = l.url
@@ -2022,10 +2067,12 @@ export async function getAdminUserDetail(
           title: l.title,
           subtitle: l.subtitle,
           url: l.url,
+          icon: l.icon,
           isActive: l.isActive,
           clicks: l.clicks,
           position: l.position,
           priceText: l.priceText,
+          badgeText: l.badgeText,
           flaggedReason: matched || undefined,
         };
       }),
@@ -2036,6 +2083,238 @@ export async function getAdminUserDetail(
     }
     console.error('Database query failed (getAdminUserDetail):', error);
     throw new Error('Gagal memuat detail pengguna.', { cause: error });
+  }
+}
+
+function sanitizeSafeAvatarOrAssetUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('/src/assets/') || trimmed.startsWith('/assets/')) {
+    return trimmed.slice(0, 500);
+  }
+  const normalized = normalizeUrl(trimmed);
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('URL avatar harus menggunakan protokol http atau https.');
+    }
+    return parsed.toString().slice(0, 500);
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('protokol')) {
+      throw err;
+    }
+    throw new Error('Format URL avatar tidak valid.');
+  }
+}
+
+export async function superAdminCreateUser(
+  actingAdminUid: string,
+  actingAdminEmail: string,
+  input: {
+    email: string;
+    password?: string;
+    username: string;
+    displayName: string;
+    bio?: string;
+    avatarUrl?: string;
+    whatsappNumber?: string;
+    contactEmail?: string;
+    role?: string;
+    planTier?: string;
+    planExpiresAt?: string | null;
+    isVerified?: boolean;
+    isFeatured?: boolean;
+  }
+): Promise<AdminUserSummaryDTO> {
+  try {
+    const cleanEmail = (input.email || '').trim().toLowerCase().slice(0, 120);
+    if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      throw new Error('Alamat email pengguna tidak valid.');
+    }
+
+    const cleanDisplayName = (input.displayName || '').trim().slice(0, 80);
+    if (!cleanDisplayName) {
+      throw new Error('Nama tampilan wajib diisi.');
+    }
+
+    const normalizedUsername = sanitizeUsername(input.username || '');
+    const settings = await getOrCreatePlatformSettings();
+    const allReserved = new Set([
+      ...BUILTIN_RESERVED_USERNAMES,
+      ...settings.reservedUsernames,
+    ]);
+    if (normalizedUsername.length < 3) {
+      throw new Error('Username minimal 3 karakter (huruf, angka, _, -).');
+    }
+    if (allReserved.has(normalizedUsername)) {
+      throw new Error(`Username @${normalizedUsername} tidak tersedia / terlarang.`);
+    }
+
+    const [existingByUsername, existingByEmail] = await Promise.all([
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.username, normalizedUsername))
+        .limit(1),
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(sql`lower(${users.email}) = ${cleanEmail}`)
+        .limit(1),
+    ]);
+
+    if (existingByUsername[0]) {
+      throw new Error(`Username @${normalizedUsername} sudah dipakai akun lain.`);
+    }
+    if (existingByEmail[0]) {
+      throw new Error(`Email ${cleanEmail} sudah terdaftar di LokaBio.`);
+    }
+
+    const rawPassword = typeof input.password === 'string' ? input.password : '';
+    if (rawPassword && rawPassword.length < 6) {
+      throw new Error('Password awal minimal 6 karakter.');
+    }
+
+    let resolvedUid = '';
+    let authCreatedMethod = 'pra-registrasi';
+
+    if (rawPassword) {
+      try {
+        const fbExisting = await adminAuth.getUserByEmail(cleanEmail).catch(() => null);
+        if (fbExisting) {
+          throw new Error(
+            'Email ini sudah terdaftar di Firebase Auth. Kosongkan kolom password untuk menautkan akun Google/Firebase yang sudah ada.'
+          );
+        }
+        const createdFb = await adminAuth.createUser({
+          email: cleanEmail,
+          password: rawPassword,
+          displayName: cleanDisplayName,
+        });
+        resolvedUid = createdFb.uid;
+        authCreatedMethod = 'Firebase Email/Password';
+      } catch (fbError: unknown) {
+        const msg =
+          fbError instanceof Error ? fbError.message : String(fbError || '');
+        if (msg.includes('sudah terdaftar di Firebase Auth')) {
+          throw fbError;
+        }
+        if (
+          msg.includes('default credentials') ||
+          msg.includes('credential') ||
+          msg.includes('Could not load')
+        ) {
+          throw new Error(
+            'Pembuatan password langsung memerlukan kredensial Service Account Firebase Admin (GOOGLE_APPLICATION_CREDENTIALS). Kosongkan kolom password untuk membuat akun pra-registrasi (login Google / daftar mandiri).'
+          );
+        }
+        throw new Error(`Gagal membuat akun Firebase Auth: ${msg}`);
+      }
+    } else {
+      try {
+        const fbExisting = await adminAuth.getUserByEmail(cleanEmail);
+        resolvedUid = fbExisting.uid;
+        authCreatedMethod = 'tautan Firebase existing';
+      } catch {
+        resolvedUid = `pre_${crypto.randomUUID()}`;
+      }
+    }
+
+    const nextRole = input.role === 'admin' ? 'admin' : 'user';
+    const nextPlan = input.planTier === 'pro' ? 'pro' : 'free';
+    const parsedExp =
+      nextPlan === 'pro' ? parseOptionalDate(input.planExpiresAt) ?? null : null;
+    const safeAvatar = input.avatarUrl
+      ? sanitizeSafeAvatarOrAssetUrl(input.avatarUrl)
+      : '/src/assets/images/avatar_creator_one_1795280504938.jpg';
+
+    const inserted = await db
+      .insert(users)
+      .values({
+        uid: resolvedUid,
+        email: cleanEmail,
+        username: normalizedUsername,
+        displayName: cleanDisplayName,
+        bio:
+          (input.bio || '').trim().slice(0, 300) ||
+          'Kreator digital & pengelola tautan di LokaBio.',
+        avatarUrl: safeAvatar,
+        role: nextRole,
+        planTier: nextPlan,
+        planExpiresAt: parsedExp,
+        isVerified: Boolean(input.isVerified),
+        isFeatured: Boolean(input.isFeatured),
+        whatsappNumber: (input.whatsappNumber || '')
+          .replace(/[^0-9+]/g, '')
+          .slice(0, 20),
+        contactEmail: (input.contactEmail || '').trim().slice(0, 120),
+        profileViews: 0,
+        themePreset: 'minimalist-light',
+        bgType: 'solid',
+        bgColor: '#F6F5F1',
+        bgGradient:
+          'linear-gradient(155deg, #2A1624 0%, #7C2D3B 52%, #D97757 100%)',
+        buttonColor: '#141413',
+        buttonTextColor: '#FAF9F6',
+        buttonShape: 'rounded',
+        textColor: '#141413',
+        fontFamily: 'sans',
+        socialPosition: 'top',
+        socialLinks: [],
+      })
+      .returning();
+
+    const created = inserted[0];
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'CREATE_USER',
+      targetUsername: created.username,
+      details: `Membuat akun @${created.username} (${created.email}, role: ${nextRole}, paket: ${nextPlan.toUpperCase()}, mode: ${authCreatedMethod})`,
+    });
+
+    return {
+      id: created.id,
+      uid: created.uid,
+      email: created.email,
+      username: created.username,
+      displayName: created.displayName,
+      avatarUrl: created.avatarUrl,
+      role: created.role,
+      planTier: isUserProActive(created) ? 'pro' : 'free',
+      planExpiresAt: created.planExpiresAt,
+      hideBranding: Boolean(created.hideBranding),
+      adminWarning: created.adminWarning || '',
+      adminWarningAt: created.adminWarningAt,
+      lastActiveAt: created.lastActiveAt || created.createdAt,
+      isVerified: created.isVerified,
+      isSuspended: created.isSuspended,
+      isFeatured: created.isFeatured,
+      featuredOrder: created.featuredOrder ?? 0,
+      profileViews: created.profileViews,
+      linkCount: 0,
+      totalClicks: 0,
+      subscriberCount: 0,
+      inquiryCount: 0,
+      createdAt: created.createdAt,
+    };
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('email') ||
+        error.message.includes('Email') ||
+        error.message.includes('Username') ||
+        error.message.includes('wajib') ||
+        error.message.includes('Password') ||
+        error.message.includes('kredensial') ||
+        error.message.includes('Firebase') ||
+        error.message.includes('protokol') ||
+        error.message.includes('avatar'))
+    ) {
+      throw error;
+    }
+    console.error('Database query failed (superAdminCreateUser):', error);
+    throw new Error('Gagal membuat akun pengguna baru.', { cause: error });
   }
 }
 
@@ -2050,6 +2329,15 @@ export async function superAdminUpdateUser(
     isFeatured?: boolean;
     featuredOrder?: number;
     newUsername?: string;
+    displayName?: string;
+    email?: string;
+    bio?: string;
+    avatarUrl?: string;
+    whatsappNumber?: string;
+    contactEmail?: string;
+    seoTitle?: string;
+    seoDescription?: string;
+    hideBranding?: boolean;
     planTier?: string;
     planExpiresAt?: string | null;
     adminWarning?: string;
@@ -2084,6 +2372,88 @@ export async function superAdminUpdateUser(
       const nextRole = patch.role === 'admin' ? 'admin' : 'user';
       updateData.role = nextRole;
       changes.push(`Peran → ${nextRole === 'admin' ? 'Super Admin' : 'User'}`);
+    }
+    if (patch.displayName !== undefined) {
+      const cleanName = patch.displayName.trim().slice(0, 80);
+      if (!cleanName) throw new Error('Nama tampilan tidak boleh kosong.');
+      if (cleanName !== target.displayName) {
+        updateData.displayName = cleanName;
+        changes.push(`Nama → "${cleanName}"`);
+      }
+    }
+    if (patch.email !== undefined) {
+      const cleanEmail = patch.email.trim().toLowerCase().slice(0, 120);
+      if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+        throw new Error('Format alamat email tidak valid.');
+      }
+      if (cleanEmail !== target.email.toLowerCase()) {
+        const emailConflict = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(
+            and(
+              sql`lower(${users.email}) = ${cleanEmail}`,
+              ne(users.id, targetUserId)
+            )
+          )
+          .limit(1);
+        if (emailConflict[0]) {
+          throw new Error(`Email ${cleanEmail} sudah dipakai akun lain.`);
+        }
+        updateData.email = cleanEmail;
+        changes.push(`Email → ${cleanEmail}`);
+      }
+    }
+    if (patch.bio !== undefined) {
+      const cleanBio = patch.bio.trim().slice(0, 300);
+      if (cleanBio !== target.bio) {
+        updateData.bio = cleanBio;
+        changes.push('Bio diperbarui');
+      }
+    }
+    if (patch.avatarUrl !== undefined) {
+      const cleanAvatar = sanitizeSafeAvatarOrAssetUrl(patch.avatarUrl);
+      if (cleanAvatar !== target.avatarUrl) {
+        updateData.avatarUrl = cleanAvatar;
+        changes.push('Avatar diperbarui');
+      }
+    }
+    if (patch.whatsappNumber !== undefined) {
+      const cleanWa = patch.whatsappNumber.replace(/[^0-9+]/g, '').slice(0, 20);
+      if (cleanWa !== target.whatsappNumber) {
+        updateData.whatsappNumber = cleanWa;
+        changes.push('WhatsApp diperbarui');
+      }
+    }
+    if (patch.contactEmail !== undefined) {
+      const cleanContact = patch.contactEmail.trim().slice(0, 120);
+      if (cleanContact !== target.contactEmail) {
+        updateData.contactEmail = cleanContact;
+        changes.push('Email kontak diperbarui');
+      }
+    }
+    if (patch.seoTitle !== undefined) {
+      const cleanSeoTitle = patch.seoTitle.trim().slice(0, 120);
+      if (cleanSeoTitle !== target.seoTitle) {
+        updateData.seoTitle = cleanSeoTitle;
+        changes.push('SEO Title diperbarui');
+      }
+    }
+    if (patch.seoDescription !== undefined) {
+      const cleanSeoDesc = patch.seoDescription.trim().slice(0, 300);
+      if (cleanSeoDesc !== target.seoDescription) {
+        updateData.seoDescription = cleanSeoDesc;
+        changes.push('SEO Description diperbarui');
+      }
+    }
+    if (patch.hideBranding !== undefined) {
+      const nextHide = Boolean(patch.hideBranding);
+      if (nextHide !== target.hideBranding) {
+        updateData.hideBranding = nextHide;
+        changes.push(
+          nextHide ? 'Sembunyikan branding aktif' : 'Branding footer tampil'
+        );
+      }
     }
     if (patch.planTier !== undefined) {
       const nextPlan = patch.planTier === 'pro' ? 'pro' : 'free';
@@ -2143,16 +2513,18 @@ export async function superAdminUpdateUser(
           'Username baru minimal 3 karakter dan tidak memakai rute sistem.'
         );
       }
-      const conflict = await db
-        .select({ id: users.id })
-        .from(users)
-        .where(and(eq(users.username, normalized), ne(users.id, targetUserId)))
-        .limit(1);
-      if (conflict[0]) {
-        throw new Error(`Username @${normalized} sudah dipakai akun lain.`);
+      if (normalized !== target.username) {
+        const conflict = await db
+          .select({ id: users.id })
+          .from(users)
+          .where(and(eq(users.username, normalized), ne(users.id, targetUserId)))
+          .limit(1);
+        if (conflict[0]) {
+          throw new Error(`Username @${normalized} sudah dipakai akun lain.`);
+        }
+        updateData.username = normalized;
+        changes.push(`Ubah handle @${target.username} → @${normalized}`);
       }
-      updateData.username = normalized;
-      changes.push(`Ubah handle @${target.username} → @${normalized}`);
     }
 
     const updated = await db
@@ -2160,6 +2532,25 @@ export async function superAdminUpdateUser(
       .set(updateData)
       .where(eq(users.id, targetUserId))
       .returning();
+
+    if (patch.planTier !== undefined && updated[0]) {
+      await db.insert(proSubscriptionsLog).values({
+        userId: updated[0].id,
+        username: updated[0].username,
+        source: 'admin_manual',
+        couponCode: '',
+        planTier: updated[0].planTier,
+        durationDays: null,
+        expiresAt: updated[0].planExpiresAt ?? null,
+        actorEmail: actingAdminEmail,
+        note:
+          updated[0].planTier === 'pro'
+            ? updated[0].planExpiresAt
+              ? `Paket Pro manual s/d ${new Date(updated[0].planExpiresAt).toISOString().slice(0, 10)}`
+              : 'Paket Pro manual permanen'
+            : 'Diturunkan ke paket Free oleh Admin',
+      });
+    }
 
     if (changes.length > 0) {
       await recordAdminAuditLog({
@@ -2178,7 +2569,11 @@ export async function superAdminUpdateUser(
       (error.message.includes('tidak dapat') ||
         error.message.includes('Username') ||
         error.message.includes('sudah dipakai') ||
-        error.message.includes('tidak ditemukan'))
+        error.message.includes('tidak ditemukan') ||
+        error.message.includes('tidak boleh kosong') ||
+        error.message.includes('email') ||
+        error.message.includes('protokol') ||
+        error.message.includes('avatar'))
     ) {
       throw error;
     }
@@ -2282,6 +2677,28 @@ export async function superAdminBulkUsersAction(
         break;
       default:
         throw new Error('Aksi massal tidak dikenali.');
+    }
+
+    if (action === 'set_pro' || action === 'set_free') {
+      const affectedTargets = targets.filter((t) => eligibleIds.includes(t.id));
+      if (affectedTargets.length > 0) {
+        await db.insert(proSubscriptionsLog).values(
+          affectedTargets.map((t) => ({
+            userId: t.id,
+            username: t.username,
+            source: 'bulk_admin',
+            couponCode: '',
+            planTier: action === 'set_pro' ? 'pro' : 'free',
+            durationDays: null,
+            expiresAt: null,
+            actorEmail: actingAdminEmail,
+            note:
+              action === 'set_pro'
+                ? 'Aksi massal naik ke paket Pro'
+                : 'Aksi massal turun ke paket Free',
+          }))
+        );
+      }
     }
 
     await recordAdminAuditLog({
@@ -2807,5 +3224,1288 @@ export async function superAdminUpdatePlatformSettings(
       error
     );
     throw new Error('Gagal menyimpan pengaturan platform.', { cause: error });
+  }
+}
+
+// --- Super Admin Direct Link CRUD, Password Reset & Support Preview ---
+
+export async function superAdminCreateUserLink(
+  targetUserId: number,
+  actingAdminUid: string,
+  actingAdminEmail: string,
+  input: {
+    linkType?: string;
+    title: string;
+    subtitle?: string;
+    url?: string;
+    icon?: string;
+    priceText?: string;
+    badgeText?: string;
+    isActive?: boolean;
+  }
+) {
+  try {
+    const userRows = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, targetUserId))
+      .limit(1);
+    const target = userRows[0];
+    if (!target) throw new Error('Pengguna tidak ditemukan.');
+
+    const cleanTitle = (input.title || '').trim().slice(0, 120);
+    if (!cleanTitle) throw new Error('Judul tautan wajib diisi.');
+
+    const allowedTypes = [
+      'standard',
+      'header',
+      'featured',
+      'embed',
+      'product',
+      'gallery',
+    ];
+    const linkType = allowedTypes.includes(input.linkType || '')
+      ? String(input.linkType)
+      : 'standard';
+
+    const noUrlRequired = linkType === 'header' || linkType === 'gallery';
+    const rawUrl = (input.url || '').trim();
+    if (!noUrlRequired && !rawUrl) {
+      throw new Error('URL tautan wajib diisi.');
+    }
+    const finalUrl = rawUrl ? normalizeUrl(rawUrl) : '';
+    if (finalUrl) {
+      try {
+        const parsed = new URL(finalUrl);
+        if (
+          parsed.protocol !== 'http:' &&
+          parsed.protocol !== 'https:' &&
+          parsed.protocol !== 'mailto:' &&
+          parsed.protocol !== 'tel:'
+        ) {
+          throw new Error('Protokol URL tidak valid.');
+        }
+      } catch {
+        throw new Error('Format URL tautan tidak valid.');
+      }
+      const settings = await getOrCreatePlatformSettings();
+      const matched = findBlockedDomainMatch(finalUrl, settings.blockedDomains);
+      if (matched) {
+        throw new Error(
+          `URL ditolak oleh filter keamanan platform (terdeteksi: "${matched}").`
+        );
+      }
+    }
+
+    const existingLinks = await db
+      .select({ position: links.position })
+      .from(links)
+      .where(eq(links.userId, target.id))
+      .orderBy(desc(links.position))
+      .limit(1);
+    const nextPos = existingLinks[0] ? existingLinks[0].position + 1 : 0;
+
+    const inserted = await db
+      .insert(links)
+      .values({
+        userId: target.id,
+        linkType,
+        title: cleanTitle,
+        subtitle: (input.subtitle || '').trim().slice(0, 180),
+        url: finalUrl,
+        icon: (input.icon || '').trim() || 'link',
+        priceText: (input.priceText || '').trim().slice(0, 40),
+        badgeText: (input.badgeText || '').trim().slice(0, 32),
+        position: nextPos,
+        isActive: input.isActive !== undefined ? Boolean(input.isActive) : true,
+        clicks: 0,
+      })
+      .returning();
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'ADMIN_CREATE_LINK',
+      targetUsername: target.username,
+      details: `Menambahkan tautan "${cleanTitle}" (${linkType}) ke akun @${target.username}`,
+    });
+
+    return inserted[0];
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('wajib') ||
+        error.message.includes('tidak ditemukan') ||
+        error.message.includes('Format URL') ||
+        error.message.includes('Protokol') ||
+        error.message.includes('filter keamanan'))
+    ) {
+      throw error;
+    }
+    console.error('Database query failed (superAdminCreateUserLink):', error);
+    throw new Error('Gagal menambahkan tautan pengguna.', { cause: error });
+  }
+}
+
+export async function superAdminUpdateLink(
+  linkId: number,
+  actingAdminUid: string,
+  actingAdminEmail: string,
+  patch: {
+    linkType?: string;
+    title?: string;
+    subtitle?: string;
+    url?: string;
+    icon?: string;
+    priceText?: string;
+    badgeText?: string;
+    isActive?: boolean;
+  }
+) {
+  try {
+    const rows = await db
+      .select()
+      .from(links)
+      .where(eq(links.id, linkId))
+      .limit(1);
+    const existing = rows[0];
+    if (!existing) throw new Error('Tautan tidak ditemukan.');
+
+    const ownerRows = await db
+      .select({ username: users.username })
+      .from(users)
+      .where(eq(users.id, existing.userId))
+      .limit(1);
+
+    const allowedTypes = [
+      'standard',
+      'header',
+      'featured',
+      'embed',
+      'product',
+      'gallery',
+    ];
+    const updateData: Record<string, unknown> = { updatedAt: new Date() };
+
+    if (patch.linkType !== undefined && allowedTypes.includes(patch.linkType)) {
+      updateData.linkType = patch.linkType;
+    }
+    if (patch.title !== undefined) {
+      const cleanTitle = patch.title.trim().slice(0, 120);
+      if (!cleanTitle) throw new Error('Judul tautan tidak boleh kosong.');
+      updateData.title = cleanTitle;
+    }
+    if (patch.subtitle !== undefined) {
+      updateData.subtitle = patch.subtitle.trim().slice(0, 180);
+    }
+    if (patch.url !== undefined) {
+      const normalized = patch.url.trim() ? normalizeUrl(patch.url) : '';
+      if (normalized) {
+        const settings = await getOrCreatePlatformSettings();
+        const matched = findBlockedDomainMatch(
+          normalized,
+          settings.blockedDomains
+        );
+        if (matched) {
+          throw new Error(
+            `URL ditolak oleh filter keamanan platform (terdeteksi: "${matched}").`
+          );
+        }
+      }
+      updateData.url = normalized;
+    }
+    if (patch.icon !== undefined) {
+      updateData.icon = patch.icon.trim() || 'link';
+    }
+    if (patch.priceText !== undefined) {
+      updateData.priceText = patch.priceText.trim().slice(0, 40);
+    }
+    if (patch.badgeText !== undefined) {
+      updateData.badgeText = patch.badgeText.trim().slice(0, 32);
+    }
+    if (patch.isActive !== undefined) {
+      updateData.isActive = Boolean(patch.isActive);
+    }
+
+    const updated = await db
+      .update(links)
+      .set(updateData)
+      .where(eq(links.id, linkId))
+      .returning();
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'ADMIN_UPDATE_LINK',
+      targetUsername: ownerRows[0]?.username || '',
+      details: `Memperbarui tautan "${updated[0]?.title || existing.title}"`,
+    });
+
+    return updated[0];
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('tidak ditemukan') ||
+        error.message.includes('tidak boleh kosong') ||
+        error.message.includes('filter keamanan'))
+    ) {
+      throw error;
+    }
+    console.error('Database query failed (superAdminUpdateLink):', error);
+    throw new Error('Gagal memperbarui tautan pengguna.', { cause: error });
+  }
+}
+
+export async function superAdminGeneratePasswordResetLink(
+  targetUserId: number,
+  actingAdminUid: string,
+  actingAdminEmail: string
+): Promise<{ email: string; resetLink: string }> {
+  try {
+    const userRows = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, targetUserId))
+      .limit(1);
+    const target = userRows[0];
+    if (!target) throw new Error('Pengguna tidak ditemukan.');
+    if (target.uid.startsWith('pre_')) {
+      throw new Error(
+        'Akun ini berstatus pra-registrasi dan belum pernah login ke Firebase Auth, sehingga belum memiliki kata sandi untuk direset.'
+      );
+    }
+
+    let resetLink = '';
+    try {
+      resetLink = await adminAuth.generatePasswordResetLink(target.email);
+    } catch (fbError: unknown) {
+      const msg =
+        fbError instanceof Error ? fbError.message : String(fbError || '');
+      if (
+        msg.includes('default credentials') ||
+        msg.includes('credential') ||
+        msg.includes('Could not load')
+      ) {
+        throw new Error(
+          'Membuat tautan reset password di server memerlukan kredensial Service Account Firebase Admin (GOOGLE_APPLICATION_CREDENTIALS). Saat berjalan lokal tanpa kredensial tersebut, minta pengguna klik "Lupa Kata Sandi" di halaman login.'
+        );
+      }
+      if (msg.includes('no user record') || msg.includes('USER_NOT_FOUND')) {
+        throw new Error(
+          `Email ${target.email} belum terdaftar di Firebase Auth.`
+        );
+      }
+      throw new Error(`Gagal membuat tautan reset password: ${msg}`);
+    }
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'GENERATE_PASSWORD_RESET',
+      targetUsername: target.username,
+      details: `Membuat tautan reset password untuk @${target.username} (${target.email})`,
+    });
+
+    return { email: target.email, resetLink };
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('Pengguna') ||
+        error.message.includes('pra-registrasi') ||
+        error.message.includes('kredensial') ||
+        error.message.includes('Firebase') ||
+        error.message.includes('reset password'))
+    ) {
+      throw error;
+    }
+    console.error(
+      'Database query failed (superAdminGeneratePasswordResetLink):',
+      error
+    );
+    throw new Error('Gagal membuat tautan reset password.', { cause: error });
+  }
+}
+
+export async function getAdminWorkspacePreviewById(
+  targetUserId: number,
+  actingAdminUid: string,
+  actingAdminEmail: string
+) {
+  try {
+    const userRows = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, targetUserId))
+      .limit(1);
+    const target = userRows[0];
+    if (!target) throw new Error('Pengguna tidak ditemukan.');
+
+    const [
+      userLinks,
+      userSubs,
+      userInq,
+      settings,
+      verificationRequest,
+      templates,
+    ] = await Promise.all([
+      db
+        .select()
+        .from(links)
+        .where(eq(links.userId, target.id))
+        .orderBy(asc(links.position), asc(links.id)),
+      db
+        .select()
+        .from(subscribers)
+        .where(eq(subscribers.userId, target.id))
+        .orderBy(desc(subscribers.createdAt)),
+      db
+        .select()
+        .from(inquiries)
+        .where(eq(inquiries.userId, target.id))
+        .orderBy(desc(inquiries.createdAt)),
+      getOrCreatePlatformSettings(),
+      getUserLatestVerificationRequest(target.id),
+      getOrSeedThemeTemplates(true),
+    ]);
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'SUPPORT_PREVIEW',
+      targetUsername: target.username,
+      details: `Membuka pratinjau Studio (read-only) akun @${target.username}`,
+    });
+
+    return {
+      user: target,
+      links: userLinks,
+      subscribers: userSubs,
+      inquiries: userInq,
+      platformNotice: {
+        announcementEnabled: settings.announcementEnabled,
+        announcementTitle: settings.announcementTitle,
+        announcementMessage: settings.announcementMessage,
+        announcementType: settings.announcementType,
+        maintenanceMode: settings.maintenanceMode,
+        maintenanceMessage: settings.maintenanceMessage,
+        freeLinkLimit: settings.freeLinkLimit,
+      },
+      verificationRequest,
+      themeTemplates: templates,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('tidak ditemukan')) {
+      throw error;
+    }
+    console.error(
+      'Database query failed (getAdminWorkspacePreviewById):',
+      error
+    );
+    throw new Error('Gagal memuat pratinjau studio pengguna.', { cause: error });
+  }
+}
+
+// --- Promo Coupons & Pro Upgrade History ---
+
+export async function getAdminCouponsAndHistory(): Promise<{
+  coupons: PromoCouponDTO[];
+  history: ProSubscriptionLogDTO[];
+}> {
+  try {
+    const [couponRows, historyRows] = await Promise.all([
+      db.select().from(promoCoupons).orderBy(desc(promoCoupons.createdAt)),
+      db
+        .select()
+        .from(proSubscriptionsLog)
+        .orderBy(desc(proSubscriptionsLog.createdAt))
+        .limit(100),
+    ]);
+    return {
+      coupons: couponRows,
+      history: historyRows,
+    };
+  } catch (error) {
+    console.error('Database query failed (getAdminCouponsAndHistory):', error);
+    throw new Error('Gagal memuat data kupon & riwayat Pro.', { cause: error });
+  }
+}
+
+export async function superAdminCreateCoupon(
+  actingAdminUid: string,
+  actingAdminEmail: string,
+  input: {
+    code: string;
+    description?: string;
+    durationDays: number;
+    maxUses: number;
+    expiresAt?: string | null;
+    isActive?: boolean;
+  }
+): Promise<PromoCouponDTO> {
+  try {
+    const cleanCode = (input.code || '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, '')
+      .slice(0, 32);
+    if (cleanCode.length < 3) {
+      throw new Error(
+        'Kode kupon minimal 3 karakter (huruf kapital, angka, -, _).'
+      );
+    }
+
+    const existing = await db
+      .select({ id: promoCoupons.id })
+      .from(promoCoupons)
+      .where(eq(promoCoupons.code, cleanCode))
+      .limit(1);
+    if (existing[0]) {
+      throw new Error(`Kode kupon "${cleanCode}" sudah ada.`);
+    }
+
+    const durationDays = Math.max(
+      0,
+      Math.min(3650, Math.round(Number(input.durationDays) || 0))
+    );
+    const maxUses = Math.max(
+      1,
+      Math.min(100000, Math.round(Number(input.maxUses) || 100))
+    );
+    const expiresAt = parseOptionalDate(input.expiresAt) ?? null;
+
+    const inserted = await db
+      .insert(promoCoupons)
+      .values({
+        code: cleanCode,
+        description: (input.description || '').trim().slice(0, 200),
+        durationDays,
+        maxUses,
+        usedCount: 0,
+        isActive: input.isActive !== undefined ? Boolean(input.isActive) : true,
+        expiresAt,
+        createdBy: actingAdminEmail,
+      })
+      .returning();
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'CREATE_COUPON',
+      details: `Membuat kupon "${cleanCode}" (${
+        durationDays === 0 ? 'Pro Selamanya' : `${durationDays} hari`
+      }, kuota ${maxUses}x)`,
+    });
+
+    return inserted[0];
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('Kode kupon') || error.message.includes('sudah ada'))
+    ) {
+      throw error;
+    }
+    console.error('Database query failed (superAdminCreateCoupon):', error);
+    throw new Error('Gagal membuat kupon promo.', { cause: error });
+  }
+}
+
+export async function superAdminUpdateCoupon(
+  couponId: number,
+  actingAdminUid: string,
+  actingAdminEmail: string,
+  patch: {
+    isActive?: boolean;
+    maxUses?: number;
+    description?: string;
+    expiresAt?: string | null;
+  }
+): Promise<PromoCouponDTO> {
+  try {
+    const existingRows = await db
+      .select()
+      .from(promoCoupons)
+      .where(eq(promoCoupons.id, couponId))
+      .limit(1);
+    const coupon = existingRows[0];
+    if (!coupon) throw new Error('Kupon tidak ditemukan.');
+
+    const updateData: Record<string, unknown> = {};
+    if (patch.isActive !== undefined) {
+      updateData.isActive = Boolean(patch.isActive);
+    }
+    if (patch.maxUses !== undefined) {
+      updateData.maxUses = Math.max(
+        coupon.usedCount,
+        Math.min(100000, Math.round(Number(patch.maxUses) || 1))
+      );
+    }
+    if (patch.description !== undefined) {
+      updateData.description = patch.description.trim().slice(0, 200);
+    }
+    if (patch.expiresAt !== undefined) {
+      updateData.expiresAt = parseOptionalDate(patch.expiresAt) ?? null;
+    }
+
+    const updated = await db
+      .update(promoCoupons)
+      .set(updateData)
+      .where(eq(promoCoupons.id, couponId))
+      .returning();
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'UPDATE_COUPON',
+      details: `Memperbarui kupon "${coupon.code}" (aktif: ${updated[0].isActive ? 'Ya' : 'Tidak'})`,
+    });
+
+    return updated[0];
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('tidak ditemukan')) {
+      throw error;
+    }
+    console.error('Database query failed (superAdminUpdateCoupon):', error);
+    throw new Error('Gagal memperbarui kupon.', { cause: error });
+  }
+}
+
+export async function superAdminDeleteCoupon(
+  couponId: number,
+  actingAdminUid: string,
+  actingAdminEmail: string
+) {
+  try {
+    const deleted = await db
+      .delete(promoCoupons)
+      .where(eq(promoCoupons.id, couponId))
+      .returning();
+    if (!deleted[0]) throw new Error('Kupon tidak ditemukan.');
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'DELETE_COUPON',
+      details: `Menghapus kupon "${deleted[0].code}"`,
+    });
+  } catch (error) {
+    console.error('Database query failed (superAdminDeleteCoupon):', error);
+    throw new Error('Gagal menghapus kupon.', { cause: error });
+  }
+}
+
+export async function redeemPromoCouponForUser(
+  uid: string,
+  rawCode: string
+): Promise<{ user: UserRecord; couponCode: string; expiresAt: Date | null }> {
+  try {
+    const cleanCode = (rawCode || '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, '')
+      .slice(0, 32);
+    if (!cleanCode) {
+      throw new Error('Masukkan kode kupon yang valid.');
+    }
+
+    return await db.transaction(async (tx) => {
+      const userRows = await tx
+        .select()
+        .from(users)
+        .where(eq(users.uid, uid))
+        .limit(1);
+      const user = userRows[0];
+      if (!user) throw new Error('Pengguna tidak ditemukan.');
+      if (user.isSuspended) {
+        throw new Error('Akun Anda sedang dinonaktifkan sementara.');
+      }
+
+      const couponRows = await tx
+        .select()
+        .from(promoCoupons)
+        .where(eq(promoCoupons.code, cleanCode))
+        .limit(1);
+      const coupon = couponRows[0];
+      if (!coupon || !coupon.isActive) {
+        throw new Error('Kode kupon tidak ditemukan atau sudah tidak aktif.');
+      }
+      if (
+        coupon.expiresAt &&
+        new Date(coupon.expiresAt).getTime() <= Date.now()
+      ) {
+        throw new Error('Masa berlaku kode kupon ini telah berakhir.');
+      }
+
+      const priorRedemption = await tx
+        .select({ id: proSubscriptionsLog.id })
+        .from(proSubscriptionsLog)
+        .where(
+          and(
+            eq(proSubscriptionsLog.userId, user.id),
+            eq(proSubscriptionsLog.couponCode, cleanCode)
+          )
+        )
+        .limit(1);
+      if (priorRedemption[0]) {
+        throw new Error('Anda sudah pernah menukarkan kode kupon ini.');
+      }
+
+      // Atomic conditional increment so concurrent redemptions cannot exceed maxUses
+      const incremented = await tx
+        .update(promoCoupons)
+        .set({ usedCount: sql`${promoCoupons.usedCount} + 1` })
+        .where(
+          and(
+            eq(promoCoupons.id, coupon.id),
+            lt(promoCoupons.usedCount, coupon.maxUses)
+          )
+        )
+        .returning();
+
+      if (!incremented[0]) {
+        throw new Error('Kuota penggunaan kode kupon ini sudah habis.');
+      }
+
+      let nextExpiresAt: Date | null = null;
+      if (coupon.durationDays > 0) {
+        const now = Date.now();
+        const currentExpMs =
+          user.planTier === 'pro' && user.planExpiresAt
+            ? new Date(user.planExpiresAt).getTime()
+            : 0;
+        const baseMs = currentExpMs > now ? currentExpMs : now;
+        nextExpiresAt = new Date(
+          baseMs + coupon.durationDays * 24 * 60 * 60 * 1000
+        );
+      }
+
+      const updatedUsers = await tx
+        .update(users)
+        .set({
+          planTier: 'pro',
+          planExpiresAt: nextExpiresAt,
+          updatedAt: new Date(),
+          lastActiveAt: new Date(),
+        })
+        .where(eq(users.id, user.id))
+        .returning();
+
+      await tx.insert(proSubscriptionsLog).values({
+        userId: user.id,
+        username: user.username,
+        source: 'coupon',
+        couponCode: cleanCode,
+        planTier: 'pro',
+        durationDays: coupon.durationDays,
+        expiresAt: nextExpiresAt,
+        actorEmail: user.email,
+        note:
+          coupon.durationDays === 0
+            ? `Klaim kupon ${cleanCode} (Pro Selamanya)`
+            : `Klaim kupon ${cleanCode} (+${coupon.durationDays} hari)`,
+      });
+
+      return {
+        user: updatedUsers[0],
+        couponCode: cleanCode,
+        expiresAt: nextExpiresAt,
+      };
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('kupon') ||
+        error.message.includes('Kode') ||
+        error.message.includes('Masa berlaku') ||
+        error.message.includes('Kuota') ||
+        error.message.includes('sudah pernah') ||
+        error.message.includes('dinonaktifkan'))
+    ) {
+      throw error;
+    }
+    console.error('Database query failed (redeemPromoCouponForUser):', error);
+    throw new Error('Gagal menukarkan kode kupon.', { cause: error });
+  }
+}
+
+// --- Curated Global Theme Templates ---
+
+function sanitizeCssValue(raw: string, fallback: string): string {
+  const cleaned = (raw || '').trim().slice(0, 240);
+  if (!cleaned) return fallback;
+  if (/[;<>{}]|javascript:|expression\(|url\(/i.test(cleaned)) {
+    return fallback;
+  }
+  return cleaned;
+}
+
+export async function getOrSeedThemeTemplates(
+  onlyActive = false
+): Promise<CuratedThemeTemplateDTO[]> {
+  try {
+    let rows = await db
+      .select()
+      .from(themeTemplates)
+      .orderBy(asc(themeTemplates.sortOrder), asc(themeTemplates.id));
+
+    if (rows.length === 0) {
+      await db
+        .insert(themeTemplates)
+        .values(
+          THEME_PRESETS.map((preset, idx) => ({
+            slug: preset.id,
+            name: preset.name,
+            description: preset.description,
+            bgType: preset.config.bgType,
+            bgColor: preset.config.bgColor,
+            bgGradient: preset.config.bgGradient,
+            buttonColor: preset.config.buttonColor,
+            buttonTextColor: preset.config.buttonTextColor,
+            buttonShape: preset.config.buttonShape,
+            textColor: preset.config.textColor,
+            fontFamily: preset.config.fontFamily,
+            isActive: true,
+            isProOnly: false,
+            sortOrder: idx + 1,
+          }))
+        )
+        .onConflictDoNothing({ target: themeTemplates.slug });
+
+      rows = await db
+        .select()
+        .from(themeTemplates)
+        .orderBy(asc(themeTemplates.sortOrder), asc(themeTemplates.id));
+    }
+
+    return onlyActive ? rows.filter((r) => r.isActive) : rows;
+  } catch (error) {
+    console.error('Database query failed (getOrSeedThemeTemplates):', error);
+    return THEME_PRESETS.map((p, idx) => ({
+      id: idx + 1,
+      slug: p.id,
+      name: p.name,
+      description: p.description,
+      ...p.config,
+      isActive: true,
+      isProOnly: false,
+      sortOrder: idx + 1,
+    }));
+  }
+}
+
+export async function superAdminCreateThemeTemplate(
+  actingAdminUid: string,
+  actingAdminEmail: string,
+  input: {
+    slug: string;
+    name: string;
+    description?: string;
+    bgType: string;
+    bgColor: string;
+    bgGradient?: string;
+    buttonColor: string;
+    buttonTextColor: string;
+    buttonShape: string;
+    textColor: string;
+    fontFamily: string;
+    isActive?: boolean;
+    isProOnly?: boolean;
+    sortOrder?: number;
+  }
+): Promise<CuratedThemeTemplateDTO> {
+  try {
+    const cleanName = (input.name || '').trim().slice(0, 60);
+    if (!cleanName) throw new Error('Nama tema wajib diisi.');
+    const cleanSlug = sanitizeUsername(input.slug || cleanName).slice(0, 40);
+    if (cleanSlug.length < 3) {
+      throw new Error('Slug tema minimal 3 karakter.');
+    }
+
+    const conflict = await db
+      .select({ id: themeTemplates.id })
+      .from(themeTemplates)
+      .where(eq(themeTemplates.slug, cleanSlug))
+      .limit(1);
+    if (conflict[0]) {
+      throw new Error(`Slug tema "${cleanSlug}" sudah digunakan.`);
+    }
+
+    const inserted = await db
+      .insert(themeTemplates)
+      .values({
+        slug: cleanSlug,
+        name: cleanName,
+        description: (input.description || '').trim().slice(0, 180),
+        bgType: input.bgType === 'gradient' ? 'gradient' : 'solid',
+        bgColor: sanitizeCssValue(input.bgColor, '#F6F5F1'),
+        bgGradient: sanitizeCssValue(
+          input.bgGradient || '',
+          'linear-gradient(135deg, #F6F5F1 0%, #EAE7DF 100%)'
+        ),
+        buttonColor: sanitizeCssValue(input.buttonColor, '#141413'),
+        buttonTextColor: sanitizeCssValue(input.buttonTextColor, '#FFFFFF'),
+        buttonShape: ['square', 'rounded', 'pill'].includes(input.buttonShape)
+          ? input.buttonShape
+          : 'rounded',
+        textColor: sanitizeCssValue(input.textColor, '#141413'),
+        fontFamily: ['sans', 'serif', 'mono'].includes(input.fontFamily)
+          ? input.fontFamily
+          : 'sans',
+        isActive: input.isActive !== undefined ? Boolean(input.isActive) : true,
+        isProOnly: Boolean(input.isProOnly),
+        sortOrder: Math.max(0, Number(input.sortOrder) || 10),
+      })
+      .returning();
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'CREATE_THEME',
+      details: `Menambahkan template tema global "${cleanName}" (${cleanSlug}${
+        input.isProOnly ? ', khusus Pro' : ''
+      })`,
+    });
+
+    return inserted[0];
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('wajib') ||
+        error.message.includes('Slug') ||
+        error.message.includes('sudah digunakan'))
+    ) {
+      throw error;
+    }
+    console.error(
+      'Database query failed (superAdminCreateThemeTemplate):',
+      error
+    );
+    throw new Error('Gagal membuat template tema.', { cause: error });
+  }
+}
+
+export async function superAdminUpdateThemeTemplate(
+  themeId: number,
+  actingAdminUid: string,
+  actingAdminEmail: string,
+  patch: Partial<{
+    name: string;
+    description: string;
+    bgType: string;
+    bgColor: string;
+    bgGradient: string;
+    buttonColor: string;
+    buttonTextColor: string;
+    buttonShape: string;
+    textColor: string;
+    fontFamily: string;
+    isActive: boolean;
+    isProOnly: boolean;
+    sortOrder: number;
+  }>
+): Promise<CuratedThemeTemplateDTO> {
+  try {
+    const existingRows = await db
+      .select()
+      .from(themeTemplates)
+      .where(eq(themeTemplates.id, themeId))
+      .limit(1);
+    const existing = existingRows[0];
+    if (!existing) throw new Error('Template tema tidak ditemukan.');
+
+    const updateData: Record<string, unknown> = { updatedAt: new Date() };
+    if (patch.name !== undefined) {
+      const cleanName = patch.name.trim().slice(0, 60);
+      if (!cleanName) throw new Error('Nama tema tidak boleh kosong.');
+      updateData.name = cleanName;
+    }
+    if (patch.description !== undefined) {
+      updateData.description = patch.description.trim().slice(0, 180);
+    }
+    if (patch.bgType !== undefined) {
+      updateData.bgType = patch.bgType === 'gradient' ? 'gradient' : 'solid';
+    }
+    if (patch.bgColor !== undefined) {
+      updateData.bgColor = sanitizeCssValue(patch.bgColor, existing.bgColor);
+    }
+    if (patch.bgGradient !== undefined) {
+      updateData.bgGradient = sanitizeCssValue(
+        patch.bgGradient,
+        existing.bgGradient
+      );
+    }
+    if (patch.buttonColor !== undefined) {
+      updateData.buttonColor = sanitizeCssValue(
+        patch.buttonColor,
+        existing.buttonColor
+      );
+    }
+    if (patch.buttonTextColor !== undefined) {
+      updateData.buttonTextColor = sanitizeCssValue(
+        patch.buttonTextColor,
+        existing.buttonTextColor
+      );
+    }
+    if (patch.buttonShape !== undefined) {
+      updateData.buttonShape = ['square', 'rounded', 'pill'].includes(
+        patch.buttonShape
+      )
+        ? patch.buttonShape
+        : existing.buttonShape;
+    }
+    if (patch.textColor !== undefined) {
+      updateData.textColor = sanitizeCssValue(
+        patch.textColor,
+        existing.textColor
+      );
+    }
+    if (patch.fontFamily !== undefined) {
+      updateData.fontFamily = ['sans', 'serif', 'mono'].includes(
+        patch.fontFamily
+      )
+        ? patch.fontFamily
+        : existing.fontFamily;
+    }
+    if (patch.isActive !== undefined) {
+      updateData.isActive = Boolean(patch.isActive);
+    }
+    if (patch.isProOnly !== undefined) {
+      updateData.isProOnly = Boolean(patch.isProOnly);
+    }
+    if (patch.sortOrder !== undefined) {
+      updateData.sortOrder = Math.max(0, Number(patch.sortOrder) || 0);
+    }
+
+    const updated = await db
+      .update(themeTemplates)
+      .set(updateData)
+      .where(eq(themeTemplates.id, themeId))
+      .returning();
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'UPDATE_THEME',
+      details: `Memperbarui template tema "${updated[0].name}" (${updated[0].slug})`,
+    });
+
+    return updated[0];
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('tidak ditemukan') ||
+        error.message.includes('tidak boleh kosong'))
+    ) {
+      throw error;
+    }
+    console.error(
+      'Database query failed (superAdminUpdateThemeTemplate):',
+      error
+    );
+    throw new Error('Gagal memperbarui template tema.', { cause: error });
+  }
+}
+
+export async function superAdminDeleteThemeTemplate(
+  themeId: number,
+  actingAdminUid: string,
+  actingAdminEmail: string
+) {
+  try {
+    const deleted = await db
+      .delete(themeTemplates)
+      .where(eq(themeTemplates.id, themeId))
+      .returning();
+    if (!deleted[0]) throw new Error('Template tema tidak ditemukan.');
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'DELETE_THEME',
+      details: `Menghapus template tema "${deleted[0].name}" (${deleted[0].slug})`,
+    });
+  } catch (error) {
+    console.error(
+      'Database query failed (superAdminDeleteThemeTemplate):',
+      error
+    );
+    throw new Error('Gagal menghapus template tema.', { cause: error });
+  }
+}
+
+// --- Audit Log Export & Platform Config Backup/Restore ---
+
+export function csvCellSafe(value: unknown): string {
+  let str = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(str)) {
+    str = `'${str}`;
+  }
+  return `"${str.replace(/"/g, '""')}"`;
+}
+
+export async function getAuditLogsForExport(options?: {
+  action?: string;
+  search?: string;
+}): Promise<AdminAuditLogDTO[]> {
+  return getAdminAuditLogs({
+    limit: 1000,
+    action: options?.action,
+    search: options?.search,
+  });
+}
+
+export async function exportPlatformBackup(
+  actingAdminUid: string,
+  actingAdminEmail: string
+): Promise<PlatformBackupDTO> {
+  try {
+    const [settings, themes, coupons, featuredUsers] = await Promise.all([
+      getOrCreatePlatformSettings(),
+      getOrSeedThemeTemplates(false),
+      db.select().from(promoCoupons).orderBy(asc(promoCoupons.id)),
+      db
+        .select({
+          username: users.username,
+          featuredOrder: users.featuredOrder,
+        })
+        .from(users)
+        .where(eq(users.isFeatured, true))
+        .orderBy(asc(users.featuredOrder)),
+    ]);
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'EXPORT_BACKUP',
+      details: `Mengunduh arsip backup konfigurasi platform (${themes.length} tema, ${coupons.length} kupon)`,
+    });
+
+    return {
+      version: 'lokabio-backup-v1',
+      exportedAt: new Date().toISOString(),
+      exportedBy: actingAdminEmail,
+      settings,
+      themes: themes.map((t) => ({
+        slug: t.slug,
+        name: t.name,
+        description: t.description,
+        bgType: t.bgType,
+        bgColor: t.bgColor,
+        bgGradient: t.bgGradient,
+        buttonColor: t.buttonColor,
+        buttonTextColor: t.buttonTextColor,
+        buttonShape: t.buttonShape,
+        textColor: t.textColor,
+        fontFamily: t.fontFamily,
+        isActive: t.isActive,
+        isProOnly: t.isProOnly,
+        sortOrder: t.sortOrder,
+      })),
+      coupons: coupons.map((c) => ({
+        code: c.code,
+        description: c.description,
+        durationDays: c.durationDays,
+        maxUses: c.maxUses,
+        usedCount: c.usedCount,
+        isActive: c.isActive,
+        expiresAt: c.expiresAt,
+        createdBy: c.createdBy,
+      })),
+      featuredCurations: featuredUsers,
+    };
+  } catch (error) {
+    console.error('Database query failed (exportPlatformBackup):', error);
+    throw new Error('Gagal membuat backup konfigurasi platform.', {
+      cause: error,
+    });
+  }
+}
+
+export async function restorePlatformBackup(
+  actingAdminUid: string,
+  actingAdminEmail: string,
+  payload: unknown
+): Promise<{
+  restoredSettings: boolean;
+  restoredThemesCount: number;
+  restoredCouponsCount: number;
+}> {
+  try {
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('Format file backup JSON tidak valid.');
+    }
+    const raw = payload as Record<string, unknown>;
+    if (!raw.settings || typeof raw.settings !== 'object') {
+      throw new Error(
+        'File backup tidak berisi bagian "settings" yang valid.'
+      );
+    }
+
+    const rawSettings = raw.settings as Record<string, unknown>;
+    await superAdminUpdatePlatformSettings(actingAdminUid, actingAdminEmail, {
+      announcementEnabled: Boolean(rawSettings.announcementEnabled),
+      announcementTitle:
+        typeof rawSettings.announcementTitle === 'string'
+          ? rawSettings.announcementTitle
+          : '',
+      announcementMessage:
+        typeof rawSettings.announcementMessage === 'string'
+          ? rawSettings.announcementMessage
+          : '',
+      announcementType:
+        typeof rawSettings.announcementType === 'string'
+          ? rawSettings.announcementType
+          : 'info',
+      reservedUsernames: Array.isArray(rawSettings.reservedUsernames)
+        ? rawSettings.reservedUsernames.map(String)
+        : undefined,
+      maintenanceMode: Boolean(rawSettings.maintenanceMode),
+      maintenanceMessage:
+        typeof rawSettings.maintenanceMessage === 'string'
+          ? rawSettings.maintenanceMessage
+          : undefined,
+      registrationOpen:
+        rawSettings.registrationOpen !== undefined
+          ? Boolean(rawSettings.registrationOpen)
+          : true,
+      freeLinkLimit:
+        typeof rawSettings.freeLinkLimit === 'number'
+          ? rawSettings.freeLinkLimit
+          : undefined,
+      blockedDomains: Array.isArray(rawSettings.blockedDomains)
+        ? rawSettings.blockedDomains.map(String)
+        : undefined,
+    });
+
+    let restoredThemesCount = 0;
+    if (Array.isArray(raw.themes)) {
+      for (const item of raw.themes.slice(0, 50)) {
+        if (!item || typeof item !== 'object') continue;
+        const t = item as Record<string, unknown>;
+        const slug = sanitizeUsername(String(t.slug || '')).slice(0, 40);
+        const name = String(t.name || '').trim().slice(0, 60);
+        if (slug.length < 3 || !name) continue;
+
+        await db
+          .insert(themeTemplates)
+          .values({
+            slug,
+            name,
+            description: String(t.description || '').trim().slice(0, 180),
+            bgType: t.bgType === 'gradient' ? 'gradient' : 'solid',
+            bgColor: sanitizeCssValue(String(t.bgColor || ''), '#F6F5F1'),
+            bgGradient: sanitizeCssValue(String(t.bgGradient || ''), ''),
+            buttonColor: sanitizeCssValue(
+              String(t.buttonColor || ''),
+              '#141413'
+            ),
+            buttonTextColor: sanitizeCssValue(
+              String(t.buttonTextColor || ''),
+              '#FFFFFF'
+            ),
+            buttonShape: ['square', 'rounded', 'pill'].includes(
+              String(t.buttonShape)
+            )
+              ? String(t.buttonShape)
+              : 'rounded',
+            textColor: sanitizeCssValue(String(t.textColor || ''), '#141413'),
+            fontFamily: ['sans', 'serif', 'mono'].includes(String(t.fontFamily))
+              ? String(t.fontFamily)
+              : 'sans',
+            isActive: t.isActive !== undefined ? Boolean(t.isActive) : true,
+            isProOnly: Boolean(t.isProOnly),
+            sortOrder: Math.max(0, Number(t.sortOrder) || 0),
+          })
+          .onConflictDoUpdate({
+            target: themeTemplates.slug,
+            set: {
+              name,
+              description: String(t.description || '').trim().slice(0, 180),
+              bgType: t.bgType === 'gradient' ? 'gradient' : 'solid',
+              bgColor: sanitizeCssValue(String(t.bgColor || ''), '#F6F5F1'),
+              bgGradient: sanitizeCssValue(String(t.bgGradient || ''), ''),
+              buttonColor: sanitizeCssValue(
+                String(t.buttonColor || ''),
+                '#141413'
+              ),
+              buttonTextColor: sanitizeCssValue(
+                String(t.buttonTextColor || ''),
+                '#FFFFFF'
+              ),
+              buttonShape: ['square', 'rounded', 'pill'].includes(
+                String(t.buttonShape)
+              )
+                ? String(t.buttonShape)
+                : 'rounded',
+              textColor: sanitizeCssValue(String(t.textColor || ''), '#141413'),
+              fontFamily: ['sans', 'serif', 'mono'].includes(
+                String(t.fontFamily)
+              )
+                ? String(t.fontFamily)
+                : 'sans',
+              isActive: t.isActive !== undefined ? Boolean(t.isActive) : true,
+              isProOnly: Boolean(t.isProOnly),
+              sortOrder: Math.max(0, Number(t.sortOrder) || 0),
+              updatedAt: new Date(),
+            },
+          });
+        restoredThemesCount += 1;
+      }
+    }
+
+    let restoredCouponsCount = 0;
+    if (Array.isArray(raw.coupons)) {
+      for (const item of raw.coupons.slice(0, 100)) {
+        if (!item || typeof item !== 'object') continue;
+        const c = item as Record<string, unknown>;
+        const code = String(c.code || '')
+          .toUpperCase()
+          .replace(/[^A-Z0-9_-]/g, '')
+          .slice(0, 32);
+        if (code.length < 3) continue;
+
+        await db
+          .insert(promoCoupons)
+          .values({
+            code,
+            description: String(c.description || '').trim().slice(0, 200),
+            durationDays: Math.max(
+              0,
+              Math.min(3650, Math.round(Number(c.durationDays) || 0))
+            ),
+            maxUses: Math.max(
+              1,
+              Math.min(100000, Math.round(Number(c.maxUses) || 100))
+            ),
+            usedCount: Math.max(0, Math.round(Number(c.usedCount) || 0)),
+            isActive: c.isActive !== undefined ? Boolean(c.isActive) : true,
+            expiresAt: parseOptionalDate(c.expiresAt) ?? null,
+            createdBy:
+              typeof c.createdBy === 'string' && c.createdBy
+                ? c.createdBy
+                : actingAdminEmail,
+          })
+          .onConflictDoNothing({ target: promoCoupons.code });
+        restoredCouponsCount += 1;
+      }
+    }
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'RESTORE_BACKUP',
+      details: `Memulihkan konfigurasi dari backup JSON (${restoredThemesCount} tema, ${restoredCouponsCount} kupon)`,
+    });
+
+    return {
+      restoredSettings: true,
+      restoredThemesCount,
+      restoredCouponsCount,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('backup')) {
+      throw error;
+    }
+    console.error('Database query failed (restorePlatformBackup):', error);
+    throw new Error('Gagal memulihkan konfigurasi platform dari backup.', {
+      cause: error,
+    });
   }
 }

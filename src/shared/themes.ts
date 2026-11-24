@@ -185,6 +185,8 @@ export interface AdminUserDetailDTO {
     bio: string;
     whatsappNumber: string;
     contactEmail: string;
+    seoTitle: string;
+    seoDescription: string;
   };
   links: Array<{
     id: number;
@@ -192,11 +194,75 @@ export interface AdminUserDetailDTO {
     title: string;
     subtitle: string;
     url: string;
+    icon: string;
     isActive: boolean;
     clicks: number;
     position: number;
     priceText: string;
+    badgeText: string;
     flaggedReason?: string;
+  }>;
+}
+
+export interface PromoCouponDTO {
+  id: number;
+  code: string;
+  description: string;
+  durationDays: number;
+  maxUses: number;
+  usedCount: number;
+  isActive: boolean;
+  expiresAt: string | Date | null;
+  createdBy: string;
+  createdAt: string | Date;
+}
+
+export interface ProSubscriptionLogDTO {
+  id: number;
+  userId: number;
+  username: string;
+  source: string;
+  couponCode: string;
+  planTier: string;
+  durationDays: number | null;
+  expiresAt: string | Date | null;
+  actorEmail: string;
+  note: string;
+  createdAt: string | Date;
+}
+
+export interface CuratedThemeTemplateDTO {
+  id: number;
+  slug: string;
+  name: string;
+  description: string;
+  bgType: BgType | string;
+  bgColor: string;
+  bgGradient: string;
+  buttonColor: string;
+  buttonTextColor: string;
+  buttonShape: ButtonShape | string;
+  textColor: string;
+  fontFamily: FontChoice | string;
+  isActive: boolean;
+  isProOnly: boolean;
+  sortOrder: number;
+  createdAt?: string | Date;
+  updatedAt?: string | Date;
+}
+
+export interface PlatformBackupDTO {
+  version: string;
+  exportedAt: string;
+  exportedBy: string;
+  settings: PlatformSettingsDTO;
+  themes: Array<Omit<CuratedThemeTemplateDTO, 'id' | 'createdAt' | 'updatedAt'>>;
+  coupons: Array<
+    Omit<PromoCouponDTO, 'id' | 'createdAt'>
+  >;
+  featuredCurations: Array<{
+    username: string;
+    featuredOrder: number;
   }>;
 }
 

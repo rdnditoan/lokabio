@@ -12,18 +12,22 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Copy,
   Crown,
   Database,
   Download,
+  Edit3,
   ExternalLink,
   Eye,
   EyeOff,
   Flag,
+  KeyRound,
   LayoutDashboard,
   Link2,
   Lock,
   LogOut,
   Megaphone,
+  Palette,
   Plus,
   Search,
   Settings,
@@ -31,8 +35,11 @@ import {
   ShieldAlert,
   ShieldCheck,
   Star,
+  Ticket,
   Trash2,
+  Upload,
   User as UserIcon,
+  UserPlus,
   Users,
   Wrench,
   X,
@@ -44,11 +51,16 @@ import {
   AdminUserDetailDTO,
   AdminUserSummaryDTO,
   BulkUserAction,
+  CuratedThemeTemplateDTO,
+  LINK_ICON_OPTIONS,
+  LINK_TYPE_OPTIONS,
   PlanTier,
   PlatformAnalyticsDTO,
   PlatformSettingsDTO,
   PlatformStatsDTO,
+  ProSubscriptionLogDTO,
   ProfileReportDTO,
+  PromoCouponDTO,
   VerificationRequestDTO,
   isUserProActive,
 } from '../shared/themes';
@@ -61,6 +73,7 @@ type AdminSectionTab =
   | 'users'
   | 'verifications'
   | 'reports'
+  | 'commerce'
   | 'curation'
   | 'analytics';
 
@@ -136,16 +149,114 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [brokenAvatars, setBrokenAvatars] = useState<Record<number, boolean>>({});
 
-  // Inspect & Moderate User Modal
+  // Inspect & Edit User Modal
   const [inspectDetail, setInspectDetail] = useState<AdminUserDetailDTO | null>(
     null
   );
   const [inspectLoading, setInspectLoading] = useState(false);
-  const [forceUsernameInput, setForceUsernameInput] = useState('');
+  const [inspectTab, setInspectTab] = useState<'profile' | 'plan' | 'links'>(
+    'profile'
+  );
+  const [editProfileForm, setEditProfileForm] = useState({
+    username: '',
+    displayName: '',
+    email: '',
+    bio: '',
+    avatarUrl: '',
+    whatsappNumber: '',
+    contactEmail: '',
+    seoTitle: '',
+    seoDescription: '',
+    hideBranding: false,
+  });
   const [planTierInput, setPlanTierInput] = useState<PlanTier>('free');
   const [planExpiresAtInput, setPlanExpiresAtInput] = useState('');
   const [warningInput, setWarningInput] = useState('');
   const [inspectSaving, setInspectSaving] = useState(false);
+
+  // Direct link CRUD & password reset inside inspect modal
+  const [resetLinkBusy, setResetLinkBusy] = useState(false);
+  const [resetLinkResult, setResetLinkResult] = useState<{
+    email: string;
+    resetLink: string;
+  } | null>(null);
+  const [adminAddLinkOpen, setAdminAddLinkOpen] = useState(false);
+  const [adminAddLinkForm, setAdminAddLinkForm] = useState({
+    linkType: 'standard',
+    title: '',
+    subtitle: '',
+    url: '',
+    icon: 'link',
+    priceText: '',
+    badgeText: '',
+  });
+  const [adminEditLinkId, setAdminEditLinkId] = useState<number | null>(null);
+  const [adminEditLinkForm, setAdminEditLinkForm] = useState({
+    linkType: 'standard',
+    title: '',
+    subtitle: '',
+    url: '',
+    icon: 'link',
+    priceText: '',
+    badgeText: '',
+    isActive: true,
+  });
+
+  // Promo Coupons, Pro Upgrade History & Curated Global Theme Templates
+  const [coupons, setCoupons] = useState<PromoCouponDTO[]>([]);
+  const [proHistory, setProHistory] = useState<ProSubscriptionLogDTO[]>([]);
+  const [themesList, setThemesList] = useState<CuratedThemeTemplateDTO[]>([]);
+  const [commerceLoading, setCommerceLoading] = useState(false);
+  const [couponBusy, setCouponBusy] = useState(false);
+  const [couponForm, setCouponForm] = useState({
+    code: '',
+    description: '',
+    durationDays: 30,
+    maxUses: 100,
+    expiresAt: '',
+  });
+  const [themeBusy, setThemeBusy] = useState(false);
+  const [editingThemeId, setEditingThemeId] = useState<number | null>(null);
+  const [themeForm, setThemeForm] = useState({
+    slug: '',
+    name: '',
+    description: '',
+    bgType: 'solid',
+    bgColor: '#F6F5F1',
+    bgGradient: 'linear-gradient(155deg, #2A1624 0%, #7C2D3B 52%, #D97757 100%)',
+    buttonColor: '#141413',
+    buttonTextColor: '#FAF9F6',
+    buttonShape: 'rounded',
+    textColor: '#141413',
+    fontFamily: 'sans',
+    isProOnly: false,
+    isActive: true,
+    sortOrder: 10,
+  });
+
+  // Audit log export & backup/restore state
+  const [exportingAudit, setExportingAudit] = useState(false);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+
+  // Create User Modal
+  const [createUserOpen, setCreateUserOpen] = useState(false);
+  const [createUserBusy, setCreateUserBusy] = useState(false);
+  const [createUserForm, setCreateUserForm] = useState({
+    displayName: '',
+    username: '',
+    email: '',
+    password: '',
+    bio: '',
+    avatarUrl: '',
+    whatsappNumber: '',
+    contactEmail: '',
+    role: 'user' as 'user' | 'admin',
+    planTier: 'free' as PlanTier,
+    planExpiresAt: '',
+    isVerified: false,
+    isFeatured: false,
+  });
 
   // Featured ordering & Settings drafts
   const [featuredDraftIds, setFeaturedDraftIds] = useState<number[]>([]);
@@ -290,6 +401,27 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
     }
   };
 
+  const loadCommerceData = async () => {
+    setCommerceLoading(true);
+    try {
+      const [cRes, tRes] = await Promise.all([
+        authFetch('/api/superadmin/coupons'),
+        authFetch('/api/superadmin/themes'),
+      ]);
+      const cData = await cRes.json().catch(() => null);
+      const tData = await tRes.json().catch(() => null);
+      if (cRes.ok && cData) {
+        if (Array.isArray(cData.coupons)) setCoupons(cData.coupons);
+        if (Array.isArray(cData.history)) setProHistory(cData.history);
+      }
+      if (tRes.ok && Array.isArray(tData?.themes)) {
+        setThemesList(tData.themes);
+      }
+    } finally {
+      setCommerceLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!user) {
       setStats(null);
@@ -304,6 +436,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
     if (!user || forbiddenMessage) return;
     if (activeTab === 'verifications') loadVerifications();
     if (activeTab === 'reports') loadReports();
+    if (activeTab === 'commerce') loadCommerceData();
     if (activeTab === 'analytics') loadAnalyticsAndLogs(analyticsDays);
   }, [activeTab, user, forbiddenMessage]);
 
@@ -519,9 +652,25 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
     }
   };
 
-  const openInspectModal = async (targetId: number) => {
+  const openInspectModal = async (
+    targetId: number,
+    initialTab: 'profile' | 'plan' | 'links' = 'profile'
+  ) => {
     setInspectLoading(true);
     setInspectDetail(null);
+    setInspectTab(initialTab);
+    setResetLinkResult(null);
+    setAdminAddLinkOpen(false);
+    setAdminEditLinkId(null);
+    setAdminAddLinkForm({
+      linkType: 'standard',
+      title: '',
+      subtitle: '',
+      url: '',
+      icon: 'link',
+      priceText: '',
+      badgeText: '',
+    });
     try {
       const res = await authFetch(`/api/superadmin/users/${targetId}/detail`);
       const data = await res.json().catch(() => ({}));
@@ -529,7 +678,18 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
         throw new Error(data.error || 'Gagal memuat detail pengguna.');
       }
       setInspectDetail(data);
-      setForceUsernameInput(data.user.username);
+      setEditProfileForm({
+        username: data.user.username || '',
+        displayName: data.user.displayName || '',
+        email: data.user.email || '',
+        bio: data.user.bio || '',
+        avatarUrl: data.user.avatarUrl || '',
+        whatsappNumber: data.user.whatsappNumber || '',
+        contactEmail: data.user.contactEmail || '',
+        seoTitle: data.user.seoTitle || '',
+        seoDescription: data.user.seoDescription || '',
+        hideBranding: Boolean(data.user.hideBranding),
+      });
       setPlanTierInput(data.user.planTier === 'pro' ? 'pro' : 'free');
       setPlanExpiresAtInput(
         data.user.planExpiresAt
@@ -540,51 +700,140 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
     } catch (err: unknown) {
       showToast(
         'err',
-        err instanceof Error ? err.message : 'Gagal membuka inspeksi.'
+        err instanceof Error ? err.message : 'Gagal membuka panel kelola user.'
       );
     } finally {
       setInspectLoading(false);
     }
   };
 
-  const handleForceRename = async () => {
+  const handleSaveInspectProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
     if (!inspectDetail) return;
-    const cleaned = forceUsernameInput.trim().toLowerCase();
-    if (!cleaned || cleaned === inspectDetail.user.username) return;
     setInspectSaving(true);
     try {
+      const payload: Record<string, unknown> = {
+        newUsername: editProfileForm.username.trim().toLowerCase(),
+        displayName: editProfileForm.displayName.trim(),
+        email: editProfileForm.email.trim().toLowerCase(),
+        bio: editProfileForm.bio,
+        avatarUrl: editProfileForm.avatarUrl.trim(),
+        whatsappNumber: editProfileForm.whatsappNumber.trim(),
+        contactEmail: editProfileForm.contactEmail.trim(),
+        seoTitle: editProfileForm.seoTitle,
+        seoDescription: editProfileForm.seoDescription,
+        hideBranding: editProfileForm.hideBranding,
+      };
       const res = await authFetch(
         `/api/superadmin/users/${inspectDetail.user.id}`,
         {
           method: 'PATCH',
-          body: JSON.stringify({ newUsername: cleaned }),
+          body: JSON.stringify(payload),
         }
       );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        throw new Error(data.error || 'Gagal mengubah username.');
+        throw new Error(data.error || 'Gagal menyimpan data pengguna.');
       }
+      const u = data.user;
       setInspectDetail((prev) =>
         prev
-          ? { ...prev, user: { ...prev.user, username: data.user.username } }
+          ? {
+              ...prev,
+              user: {
+                ...prev.user,
+                username: u.username,
+                displayName: u.displayName,
+                email: u.email,
+                bio: u.bio,
+                avatarUrl: u.avatarUrl,
+                whatsappNumber: u.whatsappNumber,
+                contactEmail: u.contactEmail,
+                seoTitle: u.seoTitle,
+                seoDescription: u.seoDescription,
+                hideBranding: Boolean(u.hideBranding),
+              },
+            }
           : prev
       );
       setUsersList((prev) =>
-        prev.map((u) =>
-          u.id === inspectDetail.user.id
-            ? { ...u, username: data.user.username }
-            : u
+        prev.map((item) =>
+          item.id === inspectDetail.user.id
+            ? {
+                ...item,
+                username: u.username,
+                displayName: u.displayName,
+                email: u.email,
+                avatarUrl: u.avatarUrl,
+                hideBranding: Boolean(u.hideBranding),
+              }
+            : item
         )
       );
-      setForceUsernameInput(data.user.username);
-      showToast('ok', `Handle diubah menjadi @${data.user.username}.`);
+      setEditProfileForm((prev) => ({
+        ...prev,
+        username: u.username,
+        displayName: u.displayName,
+        email: u.email,
+      }));
+      showToast('ok', `Data akun @${u.username} berhasil diperbarui.`);
     } catch (err: unknown) {
       showToast(
         'err',
-        err instanceof Error ? err.message : 'Gagal mengubah username.'
+        err instanceof Error ? err.message : 'Gagal menyimpan data pengguna.'
       );
     } finally {
       setInspectSaving(false);
+    }
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCreateUserBusy(true);
+    try {
+      const expiresIso =
+        createUserForm.planTier === 'pro' && createUserForm.planExpiresAt
+          ? new Date(`${createUserForm.planExpiresAt}T23:59:59`).toISOString()
+          : null;
+      const res = await authFetch('/api/superadmin/users', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...createUserForm,
+          planExpiresAt: expiresIso,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal menambahkan akun pengguna.');
+      }
+      setCreateUserOpen(false);
+      setCreateUserForm({
+        displayName: '',
+        username: '',
+        email: '',
+        password: '',
+        bio: '',
+        avatarUrl: '',
+        whatsappNumber: '',
+        contactEmail: '',
+        role: 'user',
+        planTier: 'free',
+        planExpiresAt: '',
+        isVerified: false,
+        isFeatured: false,
+      });
+      await loadOverview();
+      showToast(
+        'ok',
+        `Akun baru @${data.user?.username || ''} berhasil ditambahkan.`
+      );
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal menambahkan pengguna.'
+      );
+    } finally {
+      setCreateUserBusy(false);
     }
   };
 
@@ -808,6 +1057,177 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       showToast(
         'err',
         err instanceof Error ? err.message : 'Gagal menghapus tautan.'
+      );
+    } finally {
+      setInspectSaving(false);
+    }
+  };
+
+  const handleGenerateResetLink = async () => {
+    if (!inspectDetail) return;
+    setResetLinkBusy(true);
+    try {
+      const res = await authFetch(
+        `/api/superadmin/users/${inspectDetail.user.id}/reset-password`,
+        { method: 'POST' }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal membuat tautan reset password.');
+      }
+      setResetLinkResult({
+        email: data.email || inspectDetail.user.email,
+        resetLink: data.resetLink,
+      });
+      showToast('ok', 'Tautan reset password berhasil dibuat.');
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error
+          ? err.message
+          : 'Gagal membuat tautan reset password.'
+      );
+    } finally {
+      setResetLinkBusy(false);
+    }
+  };
+
+  const handleCopyResetLink = async () => {
+    if (!resetLinkResult?.resetLink) return;
+    try {
+      await navigator.clipboard.writeText(resetLinkResult.resetLink);
+      showToast('ok', 'Tautan reset password disalin ke clipboard.');
+    } catch {
+      showToast('err', 'Gagal menyalin otomatis. Salin secara manual.');
+    }
+  };
+
+  const handleAdminCreateLink = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inspectDetail) return;
+    setInspectSaving(true);
+    try {
+      const res = await authFetch(
+        `/api/superadmin/users/${inspectDetail.user.id}/links`,
+        {
+          method: 'POST',
+          body: JSON.stringify(adminAddLinkForm),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal menambahkan tautan pengguna.');
+      }
+      const created = data.link;
+      setInspectDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              links: [
+                ...prev.links,
+                {
+                  id: created.id,
+                  linkType: created.linkType,
+                  title: created.title,
+                  subtitle: created.subtitle || '',
+                  url: created.url || '',
+                  icon: created.icon || 'link',
+                  isActive: Boolean(created.isActive),
+                  clicks: created.clicks || 0,
+                  position: created.position || 0,
+                  priceText: created.priceText || '',
+                  badgeText: created.badgeText || '',
+                },
+              ],
+            }
+          : prev
+      );
+      setUsersList((prev) =>
+        prev.map((u) =>
+          u.id === inspectDetail.user.id
+            ? { ...u, linkCount: u.linkCount + 1 }
+            : u
+        )
+      );
+      setAdminAddLinkForm({
+        linkType: 'standard',
+        title: '',
+        subtitle: '',
+        url: '',
+        icon: 'link',
+        priceText: '',
+        badgeText: '',
+      });
+      setAdminAddLinkOpen(false);
+      showToast('ok', `Tautan baru ditambahkan ke @${inspectDetail.user.username}.`);
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal menambahkan tautan.'
+      );
+    } finally {
+      setInspectSaving(false);
+    }
+  };
+
+  const startAdminEditLink = (
+    linkItem: AdminUserDetailDTO['links'][number]
+  ) => {
+    setAdminEditLinkId(linkItem.id);
+    setAdminEditLinkForm({
+      linkType: linkItem.linkType || 'standard',
+      title: linkItem.title || '',
+      subtitle: linkItem.subtitle || '',
+      url: linkItem.url || '',
+      icon: linkItem.icon || 'link',
+      priceText: linkItem.priceText || '',
+      badgeText: linkItem.badgeText || '',
+      isActive: linkItem.isActive,
+    });
+  };
+
+  const handleAdminUpdateLink = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inspectDetail || !adminEditLinkId) return;
+    setInspectSaving(true);
+    try {
+      const res = await authFetch(`/api/superadmin/links/${adminEditLinkId}`, {
+        method: 'PUT',
+        body: JSON.stringify(adminEditLinkForm),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal memperbarui tautan.');
+      }
+      const updated = data.link;
+      setInspectDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              links: prev.links.map((item) =>
+                item.id === adminEditLinkId
+                  ? {
+                      ...item,
+                      linkType: updated.linkType,
+                      title: updated.title,
+                      subtitle: updated.subtitle || '',
+                      url: updated.url || '',
+                      icon: updated.icon || 'link',
+                      priceText: updated.priceText || '',
+                      badgeText: updated.badgeText || '',
+                      isActive: Boolean(updated.isActive),
+                    }
+                  : item
+              ),
+            }
+          : prev
+      );
+      setAdminEditLinkId(null);
+      showToast('ok', 'Perubahan tautan berhasil disimpan.');
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal memperbarui tautan.'
       );
     } finally {
       setInspectSaving(false);
@@ -1048,6 +1468,320 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
     showToast('ok', 'Data pengguna diekspor ke CSV.');
   };
 
+  // --- Promo Coupons Handlers ---
+  const handleCreateCoupon = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setCouponBusy(true);
+    try {
+      const res = await authFetch('/api/superadmin/coupons', {
+        method: 'POST',
+        body: JSON.stringify({
+          code: couponForm.code,
+          description: couponForm.description,
+          durationDays: Number(couponForm.durationDays) || 0,
+          maxUses: Number(couponForm.maxUses) || 100,
+          expiresAt: couponForm.expiresAt
+            ? new Date(`${couponForm.expiresAt}T23:59:59`).toISOString()
+            : null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Gagal membuat kupon.');
+      setCoupons((prev) => [data.coupon, ...prev]);
+      setCouponForm({
+        code: '',
+        description: '',
+        durationDays: 30,
+        maxUses: 100,
+        expiresAt: '',
+      });
+      showToast('ok', `Kupon "${data.coupon.code}" berhasil dibuat.`);
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal membuat kupon.'
+      );
+    } finally {
+      setCouponBusy(false);
+    }
+  };
+
+  const handleToggleCouponActive = async (coupon: PromoCouponDTO) => {
+    setCouponBusy(true);
+    try {
+      const res = await authFetch(`/api/superadmin/coupons/${coupon.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isActive: !coupon.isActive }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Gagal memperbarui kupon.');
+      setCoupons((prev) =>
+        prev.map((c) => (c.id === coupon.id ? data.coupon : c))
+      );
+      showToast(
+        'ok',
+        `Kupon ${coupon.code} ${data.coupon.isActive ? 'diaktifkan' : 'dinonaktifkan'}.`
+      );
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal memperbarui kupon.'
+      );
+    } finally {
+      setCouponBusy(false);
+    }
+  };
+
+  const handleDeleteCoupon = async (coupon: PromoCouponDTO) => {
+    setCouponBusy(true);
+    try {
+      const res = await authFetch(`/api/superadmin/coupons/${coupon.id}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Gagal menghapus kupon.');
+      setCoupons((prev) => prev.filter((c) => c.id !== coupon.id));
+      showToast('ok', `Kupon ${coupon.code} dihapus.`);
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal menghapus kupon.'
+      );
+    } finally {
+      setCouponBusy(false);
+    }
+  };
+
+  // --- Curated Theme Templates Handlers ---
+  const resetThemeForm = () => {
+    setEditingThemeId(null);
+    setThemeForm({
+      slug: '',
+      name: '',
+      description: '',
+      bgType: 'solid',
+      bgColor: '#F6F5F1',
+      bgGradient:
+        'linear-gradient(155deg, #2A1624 0%, #7C2D3B 52%, #D97757 100%)',
+      buttonColor: '#141413',
+      buttonTextColor: '#FAF9F6',
+      buttonShape: 'rounded',
+      textColor: '#141413',
+      fontFamily: 'sans',
+      isProOnly: false,
+      isActive: true,
+      sortOrder: themesList.length + 1,
+    });
+  };
+
+  const startEditTheme = (t: CuratedThemeTemplateDTO) => {
+    setEditingThemeId(t.id);
+    setThemeForm({
+      slug: t.slug,
+      name: t.name,
+      description: t.description || '',
+      bgType: t.bgType === 'gradient' ? 'gradient' : 'solid',
+      bgColor: t.bgColor || '#F6F5F1',
+      bgGradient:
+        t.bgGradient ||
+        'linear-gradient(155deg, #2A1624 0%, #7C2D3B 52%, #D97757 100%)',
+      buttonColor: t.buttonColor || '#141413',
+      buttonTextColor: t.buttonTextColor || '#FAF9F6',
+      buttonShape: t.buttonShape || 'rounded',
+      textColor: t.textColor || '#141413',
+      fontFamily: t.fontFamily || 'sans',
+      isProOnly: Boolean(t.isProOnly),
+      isActive: Boolean(t.isActive),
+      sortOrder: Number(t.sortOrder) || 10,
+    });
+  };
+
+  const handleSaveTheme = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setThemeBusy(true);
+    try {
+      const isEditing = editingThemeId !== null;
+      const url = isEditing
+        ? `/api/superadmin/themes/${editingThemeId}`
+        : '/api/superadmin/themes';
+      const res = await authFetch(url, {
+        method: isEditing ? 'PUT' : 'POST',
+        body: JSON.stringify(themeForm),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Gagal menyimpan tema.');
+      if (isEditing) {
+        setThemesList((prev) =>
+          prev
+            .map((t) => (t.id === editingThemeId ? data.theme : t))
+            .sort((a, b) => a.sortOrder - b.sortOrder)
+        );
+        showToast('ok', `Template tema "${data.theme.name}" diperbarui.`);
+      } else {
+        setThemesList((prev) =>
+          [...prev, data.theme].sort((a, b) => a.sortOrder - b.sortOrder)
+        );
+        showToast('ok', `Template tema baru "${data.theme.name}" ditambahkan.`);
+      }
+      resetThemeForm();
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal menyimpan template tema.'
+      );
+    } finally {
+      setThemeBusy(false);
+    }
+  };
+
+  const handleToggleThemeFlag = async (
+    t: CuratedThemeTemplateDTO,
+    patch: { isActive?: boolean; isProOnly?: boolean }
+  ) => {
+    setThemeBusy(true);
+    try {
+      const res = await authFetch(`/api/superadmin/themes/${t.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Gagal memperbarui tema.');
+      setThemesList((prev) =>
+        prev.map((item) => (item.id === t.id ? data.theme : item))
+      );
+      showToast('ok', `Status tema "${t.name}" diperbarui.`);
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal memperbarui tema.'
+      );
+    } finally {
+      setThemeBusy(false);
+    }
+  };
+
+  const handleDeleteTheme = async (t: CuratedThemeTemplateDTO) => {
+    setThemeBusy(true);
+    try {
+      const res = await authFetch(`/api/superadmin/themes/${t.id}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Gagal menghapus tema.');
+      setThemesList((prev) => prev.filter((item) => item.id !== t.id));
+      if (editingThemeId === t.id) resetThemeForm();
+      showToast('ok', `Template tema "${t.name}" dihapus.`);
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal menghapus tema.'
+      );
+    } finally {
+      setThemeBusy(false);
+    }
+  };
+
+  // --- Audit Log Export & Platform Backup / Restore Handlers ---
+  const handleExportAuditLogs = async (format: 'csv' | 'json') => {
+    setExportingAudit(true);
+    try {
+      const params = new URLSearchParams({ format });
+      if (logActionFilter && logActionFilter !== 'ALL') {
+        params.set('action', logActionFilter);
+      }
+      if (logSearchQuery.trim()) {
+        params.set('q', logSearchQuery.trim());
+      }
+      const res = await authFetch(
+        `/api/superadmin/audit-logs/export?${params.toString()}`
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Gagal mengekspor audit log.');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lokabio-audit-logs-${new Date()
+        .toISOString()
+        .slice(0, 10)}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('ok', `Audit log diekspor ke format ${format.toUpperCase()}.`);
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal mengekspor audit log.'
+      );
+    } finally {
+      setExportingAudit(false);
+    }
+  };
+
+  const handleDownloadBackup = async () => {
+    setBackupBusy(true);
+    try {
+      const res = await authFetch('/api/superadmin/backup');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Gagal mengunduh backup.');
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lokabio-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('ok', 'Backup konfigurasi platform (JSON) berhasil diunduh.');
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal mengunduh backup.'
+      );
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleRestoreBackupFile = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setRestoreBusy(true);
+    try {
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText);
+      const res = await authFetch('/api/superadmin/backup/restore', {
+        method: 'POST',
+        body: JSON.stringify(parsed),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal memulihkan backup konfigurasi.');
+      }
+      await Promise.all([loadOverview(), loadCommerceData()]);
+      showToast(
+        'ok',
+        `Konfigurasi dipulihkan (${data.restoredThemesCount ?? 0} tema, ${
+          data.restoredCouponsCount ?? 0
+        } kupon).`
+      );
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error
+          ? err.message
+          : 'File JSON tidak valid atau gagal dipulihkan.'
+      );
+    } finally {
+      setRestoreBusy(false);
+    }
+  };
+
   if (authLoading) {
     return (
       <div className="min-h-screen bg-[#F6F5F1] flex items-center justify-center">
@@ -1180,6 +1914,11 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       count: stats?.pendingReports || 0,
     },
     {
+      id: 'commerce',
+      label: 'Kupon & Tema',
+      icon: <Ticket className="w-3.5 h-3.5" />,
+    },
+    {
       id: 'curation',
       label: 'Pratinjau & Pengaturan',
       icon: <Settings className="w-3.5 h-3.5" />,
@@ -1278,6 +2017,14 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
           <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
             <button
               type="button"
+              onClick={() => setCreateUserOpen(true)}
+              className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-[#D97757] text-white text-xs font-semibold hover:bg-[#c56647] transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <UserPlus className="w-3.5 h-3.5" />
+              <span>Tambah User</span>
+            </button>
+            <button
+              type="button"
               onClick={handleExportUsersCsv}
               className="min-h-[38px] px-3.5 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-medium hover:bg-stone-50 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
             >
@@ -1290,6 +2037,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                 loadOverview();
                 if (activeTab === 'verifications') loadVerifications();
                 if (activeTab === 'reports') loadReports();
+                if (activeTab === 'commerce') loadCommerceData();
                 if (activeTab === 'analytics') loadAnalyticsAndLogs();
               }}
               className="min-h-[38px] px-3.5 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-medium hover:bg-stone-50 transition-colors whitespace-nowrap"
@@ -1675,11 +2423,23 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                         <div className="flex flex-wrap items-center gap-2 shrink-0 pl-7 xl:pl-0">
                           <button
                             type="button"
-                            onClick={() => openInspectModal(u.id)}
+                            onClick={() => openInspectModal(u.id, 'profile')}
                             className="min-h-[36px] px-3 py-1.5 rounded-xl border border-stone-200 bg-stone-50 text-xs font-medium text-[#141413] hover:bg-stone-100 inline-flex items-center gap-1.5 whitespace-nowrap"
                           >
-                            <Link2 className="w-3.5 h-3.5" />
-                            <span>Inspeksi</span>
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>Ubah &amp; Kelola</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() =>
+                              onNavigate(`/dashboard?previewUserId=${u.id}`)
+                            }
+                            className="min-h-[36px] px-3 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 inline-flex items-center gap-1.5 whitespace-nowrap"
+                            title="Buka Studio user dalam mode pratinjau read-only"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>Pratinjau Studio</span>
                           </button>
 
                           <button
@@ -2126,6 +2886,726 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* TAB 3B: KUPON PROMO, RIWAYAT PRO & KURASI TEMA GLOBAL */}
+        {activeTab === 'commerce' && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+              {/* Manajemen Kupon Promo */}
+              <div className="lg:col-span-6 bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-5">
+                <div className="flex items-center gap-2">
+                  <Ticket className="w-4 h-4 text-[#D97757]" />
+                  <div>
+                    <h2 className="font-display text-base font-bold">
+                      Manajemen Kupon Promo Pro
+                    </h2>
+                    <p className="text-xs text-stone-500">
+                      Buat kode promo yang dapat ditukar kreator langsung di Studio (SEO &amp; QR) untuk upgrade Pro.
+                    </p>
+                  </div>
+                </div>
+
+                <form
+                  onSubmit={handleCreateCoupon}
+                  className="p-4 rounded-xl bg-stone-50 border border-stone-200 space-y-3"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                        Kode Kupon *
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        value={couponForm.code}
+                        onChange={(e) =>
+                          setCouponForm((prev) => ({
+                            ...prev,
+                            code: e.target.value
+                              .toUpperCase()
+                              .replace(/[^A-Z0-9_-]/g, ''),
+                          }))
+                        }
+                        placeholder="LOKABIOPRO30"
+                        className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs font-mono focus:outline-none focus:border-[#141413]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                        Keterangan Singkat
+                      </label>
+                      <input
+                        type="text"
+                        value={couponForm.description}
+                        onChange={(e) =>
+                          setCouponForm((prev) => ({
+                            ...prev,
+                            description: e.target.value,
+                          }))
+                        }
+                        placeholder="Promo launching UMKM"
+                        className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                        Durasi Hari (0 = Selamanya)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={3650}
+                        value={couponForm.durationDays}
+                        onChange={(e) =>
+                          setCouponForm((prev) => ({
+                            ...prev,
+                            durationDays: Math.max(
+                              0,
+                              Number(e.target.value) || 0
+                            ),
+                          }))
+                        }
+                        className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs tabular-nums focus:outline-none focus:border-[#141413]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                        Maks Pemakaian
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100000}
+                        value={couponForm.maxUses}
+                        onChange={(e) =>
+                          setCouponForm((prev) => ({
+                            ...prev,
+                            maxUses: Math.max(
+                              1,
+                              Number(e.target.value) || 1
+                            ),
+                          }))
+                        }
+                        className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs tabular-nums focus:outline-none focus:border-[#141413]"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                        Batas Klaim (Opsional)
+                      </label>
+                      <input
+                        type="date"
+                        value={couponForm.expiresAt}
+                        onChange={(e) =>
+                          setCouponForm((prev) => ({
+                            ...prev,
+                            expiresAt: e.target.value,
+                          }))
+                        }
+                        className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <button
+                      type="submit"
+                      disabled={couponBusy || !couponForm.code.trim()}
+                      className="min-h-[38px] px-4 py-1.5 rounded-xl bg-[#D97757] text-white text-xs font-semibold hover:bg-[#c56647] disabled:opacity-50 inline-flex items-center gap-1.5"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>{couponBusy ? 'Menyimpan...' : 'Buat Kupon'}</span>
+                    </button>
+                  </div>
+                </form>
+
+                {commerceLoading ? (
+                  <p className="text-xs text-stone-500 py-6 text-center">
+                    Memuat daftar kupon...
+                  </p>
+                ) : coupons.length === 0 ? (
+                  <p className="text-xs text-stone-500 py-6 text-center">
+                    Belum ada kupon promo yang dibuat.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-stone-100">
+                    {coupons.map((c) => (
+                      <div
+                        key={c.id}
+                        className={`py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                          !c.isActive ? 'opacity-60' : ''
+                        }`}
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-mono text-xs font-bold px-2 py-0.5 rounded-md bg-stone-100 border border-stone-200 text-[#141413]">
+                              {c.code}
+                            </span>
+                            <span className="text-xs font-semibold text-amber-800">
+                              {c.durationDays === 0
+                                ? 'Pro Selamanya'
+                                : `+${c.durationDays} hari`}
+                            </span>
+                            <span className="text-[11px] text-stone-500 tabular-nums">
+                              · Terpakai {c.usedCount}/{c.maxUses}
+                            </span>
+                          </div>
+                          {c.description && (
+                            <p className="text-xs text-stone-600">
+                              {c.description}
+                            </p>
+                          )}
+                          <p className="text-[11px] text-stone-400">
+                            {c.expiresAt
+                              ? `Berlaku s/d ${new Date(
+                                  c.expiresAt
+                                ).toLocaleDateString('id-ID')}`
+                              : 'Tanpa batas tanggal klaim'}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            disabled={couponBusy}
+                            onClick={() => handleToggleCouponActive(c)}
+                            className={`min-h-[32px] px-2.5 py-1 rounded-lg border text-xs font-medium ${
+                              c.isActive
+                                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                                : 'border-stone-200 bg-white text-stone-600'
+                            }`}
+                          >
+                            {c.isActive ? 'Aktif' : 'Nonaktif'}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={couponBusy}
+                            onClick={() => handleDeleteCoupon(c)}
+                            aria-label={`Hapus kupon ${c.code}`}
+                            className="min-h-[32px] px-2 py-1 rounded-lg border border-red-200 text-red-700 hover:bg-red-50"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Riwayat Upgrade Pro */}
+              <div className="lg:col-span-6 bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
+                <div className="flex items-center gap-2">
+                  <Crown className="w-4 h-4 text-amber-600" />
+                  <div>
+                    <h2 className="font-display text-base font-bold">
+                      Riwayat Perubahan &amp; Klaim Paket Pro
+                    </h2>
+                    <p className="text-xs text-stone-500">
+                      Jejak upgrade manual admin, aksi massal, dan penukaran kode kupon kreator.
+                    </p>
+                  </div>
+                </div>
+
+                {commerceLoading ? (
+                  <p className="text-xs text-stone-500 py-6 text-center">
+                    Memuat riwayat upgrade...
+                  </p>
+                ) : proHistory.length === 0 ? (
+                  <p className="text-xs text-stone-500 py-8 text-center">
+                    Belum ada riwayat perubahan paket Pro.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-stone-100 max-h-[460px] overflow-y-auto pr-1">
+                    {proHistory.map((item) => (
+                      <div
+                        key={item.id}
+                        className="py-2.5 flex items-start justify-between gap-3 text-xs"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono font-semibold text-[#141413]">
+                              @{item.username}
+                            </span>
+                            <span
+                              className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                                item.planTier === 'pro'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-stone-100 text-stone-600'
+                              }`}
+                            >
+                              {item.planTier}
+                            </span>
+                            {item.couponCode && (
+                              <span className="font-mono text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-800">
+                                {item.couponCode}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-stone-600">
+                            {item.note || item.source}
+                          </p>
+                          <p className="text-[10px] text-stone-400">
+                            Oleh {item.actorEmail} · Sumber: {item.source}
+                          </p>
+                        </div>
+                        <span className="text-[11px] text-stone-400 tabular-nums shrink-0">
+                          {new Date(item.createdAt).toLocaleDateString('id-ID', {
+                            day: 'numeric',
+                            month: 'short',
+                            year: 'numeric',
+                          })}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Kurasi Template Tema Global Resmi */}
+            <div className="bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Palette className="w-4 h-4 text-[#D97757]" />
+                  <div>
+                    <h2 className="font-display text-base font-bold">
+                      Kurasi Template Tema Global Resmi
+                    </h2>
+                    <p className="text-xs text-stone-500">
+                      Tambahkan atau atur preset tema yang muncul di tab Tema Studio seluruh kreator (dapat dikunci khusus Paket Pro).
+                    </p>
+                  </div>
+                </div>
+                {editingThemeId !== null && (
+                  <button
+                    type="button"
+                    onClick={resetThemeForm}
+                    className="min-h-[34px] px-3 py-1 rounded-xl border border-stone-200 text-xs font-medium text-stone-600 hover:bg-stone-50"
+                  >
+                    Batal Edit
+                  </button>
+                )}
+              </div>
+
+              <form
+                onSubmit={handleSaveTheme}
+                className="p-4 rounded-xl bg-stone-50 border border-stone-200 space-y-3.5"
+              >
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                  {/* Live mini swatch preview */}
+                  <div className="lg:col-span-3">
+                    <p className="text-[11px] font-medium text-stone-600 mb-1.5">
+                      Pratinjau Swatch
+                    </p>
+                    <div
+                      className="rounded-2xl border border-stone-200 p-4 flex flex-col items-center gap-2.5 text-center"
+                      style={{
+                        backgroundColor: themeForm.bgColor,
+                        backgroundImage:
+                          themeForm.bgType === 'gradient'
+                            ? themeForm.bgGradient
+                            : undefined,
+                        color: themeForm.textColor,
+                      }}
+                    >
+                      <div className="w-8 h-8 rounded-full bg-white/30 border border-white/40" />
+                      <p className="text-xs font-bold truncate max-w-full">
+                        {themeForm.name || 'Nama Tema'}
+                      </p>
+                      <div
+                        className={`w-full py-1.5 px-3 text-[11px] font-semibold ${
+                          themeForm.buttonShape === 'square'
+                            ? 'rounded-none'
+                            : themeForm.buttonShape === 'pill'
+                            ? 'rounded-full'
+                            : 'rounded-xl'
+                        }`}
+                        style={{
+                          backgroundColor: themeForm.buttonColor,
+                          color: themeForm.buttonTextColor,
+                        }}
+                      >
+                        Contoh Tombol
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Theme fields */}
+                  <div className="lg:col-span-9 space-y-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Nama Tema *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          value={themeForm.name}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              name: e.target.value,
+                            }))
+                          }
+                          placeholder="Matcha Cream"
+                          className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Slug ID *
+                        </label>
+                        <input
+                          type="text"
+                          required
+                          disabled={editingThemeId !== null}
+                          value={themeForm.slug}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              slug: e.target.value
+                                .toLowerCase()
+                                .replace(/[^a-z0-9_-]/g, ''),
+                            }))
+                          }
+                          placeholder="matcha-cream"
+                          className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs font-mono disabled:bg-stone-100 focus:outline-none focus:border-[#141413]"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Urutan Tampil
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={themeForm.sortOrder}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              sortOrder: Math.max(
+                                0,
+                                Number(e.target.value) || 0
+                              ),
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs tabular-nums focus:outline-none focus:border-[#141413]"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                        Deskripsi Singkat
+                      </label>
+                      <input
+                        type="text"
+                        value={themeForm.description}
+                        onChange={(e) =>
+                          setThemeForm((prev) => ({
+                            ...prev,
+                            description: e.target.value,
+                          }))
+                        }
+                        placeholder="Nuansa hijau tenang untuk brand kuliner & wellness."
+                        className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Tipe Latar
+                        </label>
+                        <select
+                          value={themeForm.bgType}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              bgType: e.target.value,
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs"
+                        >
+                          <option value="solid">Solid</option>
+                          <option value="gradient">Gradasi</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Bentuk Tombol
+                        </label>
+                        <select
+                          value={themeForm.buttonShape}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              buttonShape: e.target.value,
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs"
+                        >
+                          <option value="rounded">Rounded</option>
+                          <option value="pill">Pill</option>
+                          <option value="square">Square</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Font
+                        </label>
+                        <select
+                          value={themeForm.fontFamily}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              fontFamily: e.target.value,
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs"
+                        >
+                          <option value="sans">Sans</option>
+                          <option value="serif">Serif</option>
+                          <option value="mono">Mono</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Warna Latar
+                        </label>
+                        <input
+                          type="text"
+                          value={themeForm.bgColor}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              bgColor: e.target.value,
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Warna Teks Profil
+                        </label>
+                        <input
+                          type="text"
+                          value={themeForm.textColor}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              textColor: e.target.value,
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Warna Tombol
+                        </label>
+                        <input
+                          type="text"
+                          value={themeForm.buttonColor}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              buttonColor: e.target.value,
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          Warna Teks Tombol
+                        </label>
+                        <input
+                          type="text"
+                          value={themeForm.buttonTextColor}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              buttonTextColor: e.target.value,
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    {themeForm.bgType === 'gradient' && (
+                      <div>
+                        <label className="block text-[11px] font-medium text-stone-600 mb-1">
+                          CSS Linear Gradient
+                        </label>
+                        <input
+                          type="text"
+                          value={themeForm.bgGradient}
+                          onChange={(e) =>
+                            setThemeForm((prev) => ({
+                              ...prev,
+                              bgGradient: e.target.value,
+                            }))
+                          }
+                          className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs font-mono"
+                        />
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                      <div className="flex flex-wrap items-center gap-4">
+                        <label className="inline-flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={themeForm.isActive}
+                            onChange={(e) =>
+                              setThemeForm((prev) => ({
+                                ...prev,
+                                isActive: e.target.checked,
+                              }))
+                            }
+                            className="w-4 h-4 rounded border-stone-300 accent-[#141413]"
+                          />
+                          <span>Tampilkan di Studio</span>
+                        </label>
+                        <label className="inline-flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={themeForm.isProOnly}
+                            onChange={(e) =>
+                              setThemeForm((prev) => ({
+                                ...prev,
+                                isProOnly: e.target.checked,
+                              }))
+                            }
+                            className="w-4 h-4 rounded border-stone-300 accent-[#141413]"
+                          />
+                          <span>Khusus Paket Pro</span>
+                        </label>
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={themeBusy}
+                        className="min-h-[38px] px-4 py-1.5 rounded-xl bg-[#141413] text-white text-xs font-semibold hover:bg-stone-800 disabled:opacity-50"
+                      >
+                        {themeBusy
+                          ? 'Menyimpan...'
+                          : editingThemeId !== null
+                          ? 'Simpan Perubahan Tema'
+                          : 'Tambah Template Tema'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </form>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                {themesList.map((t) => (
+                  <div
+                    key={t.id}
+                    className={`rounded-2xl border border-stone-200 p-4 space-y-3 ${
+                      !t.isActive ? 'opacity-60 bg-stone-50' : 'bg-white'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div
+                          className="w-10 h-10 rounded-xl border border-stone-200 shrink-0 flex items-center justify-center"
+                          style={{
+                            backgroundColor: t.bgColor,
+                            backgroundImage:
+                              t.bgType === 'gradient'
+                                ? t.bgGradient
+                                : undefined,
+                          }}
+                        >
+                          <span
+                            className="w-4 h-2 rounded-full"
+                            style={{ backgroundColor: t.buttonColor }}
+                          />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <p className="text-xs font-bold text-[#141413] truncate">
+                              {t.name}
+                            </p>
+                            {t.isProOnly && (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[9px] font-bold uppercase">
+                                PRO
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-stone-400 font-mono truncate">
+                            {t.slug} · #{t.sortOrder}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <p className="text-[11px] text-stone-500 line-clamp-2 min-h-[2rem]">
+                      {t.description || 'Tanpa deskripsi.'}
+                    </p>
+
+                    <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-stone-100">
+                      <button
+                        type="button"
+                        disabled={themeBusy}
+                        onClick={() => startEditTheme(t)}
+                        className="min-h-[30px] px-2.5 py-1 rounded-lg border border-stone-200 text-[11px] font-medium hover:bg-stone-50 inline-flex items-center gap-1"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        <span>Edit</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={themeBusy}
+                        onClick={() =>
+                          handleToggleThemeFlag(t, { isActive: !t.isActive })
+                        }
+                        className={`min-h-[30px] px-2.5 py-1 rounded-lg border text-[11px] font-medium ${
+                          t.isActive
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                            : 'border-stone-200 bg-white text-stone-600'
+                        }`}
+                      >
+                        {t.isActive ? 'Aktif' : 'Nonaktif'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={themeBusy}
+                        onClick={() =>
+                          handleToggleThemeFlag(t, { isProOnly: !t.isProOnly })
+                        }
+                        className={`min-h-[30px] px-2.5 py-1 rounded-lg border text-[11px] font-medium ${
+                          t.isProOnly
+                            ? 'border-amber-200 bg-amber-50 text-amber-800'
+                            : 'border-stone-200 bg-white text-stone-600'
+                        }`}
+                      >
+                        {t.isProOnly ? 'Pro Only' : 'Gratis'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={themeBusy}
+                        onClick={() => handleDeleteTheme(t)}
+                        aria-label={`Hapus tema ${t.name}`}
+                        className="ml-auto min-h-[30px] px-2 py-1 rounded-lg border border-red-200 text-red-700 hover:bg-red-50"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
 
@@ -2597,6 +4077,54 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                   </button>
                 </div>
               </div>
+
+              {/* Backup & Restore Konfigurasi Platform (JSON) */}
+              <div className="bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-[#D97757]" />
+                  <div>
+                    <h2 className="font-display text-base font-bold">
+                      Backup &amp; Restore Konfigurasi Platform
+                    </h2>
+                    <p className="text-xs text-stone-500">
+                      Ekspor pengaturan global, blocklist, preset tema resmi, dan daftar kupon ke satu file JSON, atau pulihkan kembali kapan saja.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    disabled={backupBusy}
+                    onClick={handleDownloadBackup}
+                    className="min-h-[40px] px-4 py-2 rounded-xl bg-[#141413] text-white text-xs font-semibold hover:bg-stone-800 disabled:opacity-50 inline-flex items-center gap-1.5"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>
+                      {backupBusy ? 'Menyiapkan...' : 'Unduh Backup JSON'}
+                    </span>
+                  </button>
+
+                  <label
+                    className={`min-h-[40px] px-4 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs font-medium text-[#141413] hover:bg-stone-100 inline-flex items-center gap-1.5 cursor-pointer ${
+                      restoreBusy ? 'opacity-50 pointer-events-none' : ''
+                    }`}
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>
+                      {restoreBusy
+                        ? 'Memulihkan...'
+                        : 'Pulihkan dari File JSON'}
+                    </span>
+                    <input
+                      type="file"
+                      accept="application/json,.json"
+                      disabled={restoreBusy}
+                      onChange={handleRestoreBackupFile}
+                      className="sr-only"
+                    />
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -2863,7 +4391,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                   </div>
                 </div>
 
-                <div className="flex flex-col sm:flex-row gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <select
                     aria-label="Filter tipe aksi audit log"
                     value={logActionFilter}
@@ -2875,11 +4403,24 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                     className="min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
                   >
                     <option value="ALL">Semua Aksi</option>
+                    <option value="CREATE_USER">CREATE_USER</option>
                     <option value="UPDATE_USER">UPDATE_USER</option>
                     <option value="BULK_USER_ACTION">BULK_USER_ACTION</option>
                     <option value="DELETE_USER">DELETE_USER</option>
+                    <option value="ADMIN_CREATE_LINK">ADMIN_CREATE_LINK</option>
+                    <option value="ADMIN_UPDATE_LINK">ADMIN_UPDATE_LINK</option>
                     <option value="MODERATE_LINK">MODERATE_LINK</option>
                     <option value="DELETE_LINK">DELETE_LINK</option>
+                    <option value="GENERATE_PASSWORD_RESET">
+                      GENERATE_PASSWORD_RESET
+                    </option>
+                    <option value="SUPPORT_PREVIEW">SUPPORT_PREVIEW</option>
+                    <option value="CREATE_COUPON">CREATE_COUPON</option>
+                    <option value="UPDATE_COUPON">UPDATE_COUPON</option>
+                    <option value="DELETE_COUPON">DELETE_COUPON</option>
+                    <option value="CREATE_THEME">CREATE_THEME</option>
+                    <option value="UPDATE_THEME">UPDATE_THEME</option>
+                    <option value="DELETE_THEME">DELETE_THEME</option>
                     <option value="REVIEW_VERIFICATION">
                       REVIEW_VERIFICATION
                     </option>
@@ -2891,6 +4432,8 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                     <option value="CLEANUP_CLICK_EVENTS">
                       CLEANUP_CLICK_EVENTS
                     </option>
+                    <option value="EXPORT_BACKUP">EXPORT_BACKUP</option>
+                    <option value="RESTORE_BACKUP">RESTORE_BACKUP</option>
                   </select>
                   <div className="flex gap-1.5">
                     <input
@@ -2915,6 +4458,24 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                       Filter
                     </button>
                   </div>
+                  <button
+                    type="button"
+                    disabled={exportingAudit}
+                    onClick={() => handleExportAuditLogs('csv')}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50 inline-flex items-center gap-1.5 whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Ekspor CSV</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={exportingAudit}
+                    onClick={() => handleExportAuditLogs('json')}
+                    className="min-h-[38px] px-3 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50 inline-flex items-center gap-1.5 whitespace-nowrap"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Ekspor JSON</span>
+                  </button>
                 </div>
               </div>
 
@@ -2958,7 +4519,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
         )}
       </main>
 
-      {/* User Inspection & Link Moderation Modal */}
+      {/* User Inspection, Edit Data & Link Moderation Modal */}
       <AnimatePresence>
         {(inspectLoading || inspectDetail) && (
           <motion.div
@@ -2971,13 +4532,13 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
               initial={{ opacity: 0, scale: 0.96, y: 8 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.96, y: 8 }}
-              className="w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-white rounded-2xl border border-stone-200 p-6 space-y-5 shadow-2xl"
+              className="w-full max-w-2xl max-h-[88vh] overflow-y-auto bg-white rounded-2xl border border-stone-200 p-6 space-y-5 shadow-2xl"
             >
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <h2 className="font-display text-lg font-bold">
                     {inspectDetail
-                      ? `Inspeksi Akun @${inspectDetail.user.username}`
+                      ? `Kelola & Ubah Data @${inspectDetail.user.username}`
                       : 'Memuat Detail Akun...'}
                   </h2>
                   {inspectDetail && (
@@ -2987,14 +4548,30 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                     </p>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setInspectDetail(null)}
-                  className="p-2 rounded-lg hover:bg-stone-100 text-stone-500"
-                  aria-label="Tutup inspeksi"
-                >
-                  <X className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {inspectDetail && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetId = inspectDetail.user.id;
+                        setInspectDetail(null);
+                        onNavigate(`/dashboard?previewUserId=${targetId}`);
+                      }}
+                      className="min-h-[34px] px-3 py-1 rounded-xl border border-stone-200 bg-stone-50 text-xs font-medium text-[#141413] hover:bg-stone-100 inline-flex items-center gap-1.5"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      <span>Pratinjau Studio</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setInspectDetail(null)}
+                    className="p-2 rounded-lg hover:bg-stone-100 text-stone-500"
+                    aria-label="Tutup panel kelola"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
 
               {inspectLoading || !inspectDetail ? (
@@ -3003,212 +4580,994 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                 </div>
               ) : (
                 <>
-                  {/* Paket & Kuota Kreator */}
-                  <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-3">
-                    <div className="flex items-center gap-2">
-                      <Crown className="w-4 h-4 text-amber-700" />
-                      <label className="text-xs font-semibold text-[#141413]">
-                        Paket &amp; Masa Aktif Langganan
-                      </label>
-                    </div>
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <select
-                        value={planTierInput}
-                        onChange={(e) =>
-                          setPlanTierInput(e.target.value as PlanTier)
-                        }
-                        className="min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs font-medium focus:outline-none focus:border-[#141413]"
-                      >
-                        <option value="free">
-                          Paket Free (Maks {settings.freeLinkLimit} tautan)
-                        </option>
-                        <option value="pro">
-                          Paket Pro (Tautan tak terbatas + Hapus Branding)
-                        </option>
-                      </select>
-                      {planTierInput === 'pro' && (
-                        <input
-                          type="date"
-                          value={planExpiresAtInput}
-                          onChange={(e) => setPlanExpiresAtInput(e.target.value)}
-                          title="Kosongkan untuk Pro permanen"
-                          className="min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
-                        />
-                      )}
-                      <button
-                        type="button"
-                        disabled={inspectSaving}
-                        onClick={handleSaveInspectPlan}
-                        className="min-h-[38px] px-4 py-1.5 rounded-xl bg-[#141413] text-white text-xs font-medium hover:bg-stone-800 disabled:opacity-45 whitespace-nowrap"
-                      >
-                        Simpan Paket
-                      </button>
-                    </div>
-                    {planTierInput === 'pro' && (
-                      <p className="text-[11px] text-stone-500">
-                        Kosongkan tanggal kedaluwarsa jika ingin memberikan paket Pro tanpa batas waktu.
-                      </p>
-                    )}
+                  {/* Modal Sub-Tabs */}
+                  <div className="flex items-center gap-1.5 p-1 bg-stone-100 rounded-xl overflow-x-auto">
+                    <button
+                      type="button"
+                      onClick={() => setInspectTab('profile')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                        inspectTab === 'profile'
+                          ? 'bg-white text-[#141413] shadow-xs'
+                          : 'text-stone-600 hover:text-[#141413]'
+                      }`}
+                    >
+                      Ubah Data Profil
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInspectTab('plan')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
+                        inspectTab === 'plan'
+                          ? 'bg-white text-[#141413] shadow-xs'
+                          : 'text-stone-600 hover:text-[#141413]'
+                      }`}
+                    >
+                      Paket &amp; Peringatan
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInspectTab('links')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-colors tabular-nums ${
+                        inspectTab === 'links'
+                          ? 'bg-white text-[#141413] shadow-xs'
+                          : 'text-stone-600 hover:text-[#141413]'
+                      }`}
+                    >
+                      Moderasi Tautan ({inspectDetail.links.length})
+                    </button>
                   </div>
 
-                  {/* Peringatan Khusus Akun */}
-                  <div className="p-4 rounded-xl bg-red-50/60 border border-red-200 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <AlertTriangle className="w-4 h-4 text-red-600" />
-                        <label className="text-xs font-semibold text-[#141413]">
-                          Peringatan / Notifikasi Khusus ke Studio Pengguna
-                        </label>
+                  {inspectTab === 'profile' && (
+                    <form
+                      onSubmit={handleSaveInspectProfile}
+                      className="space-y-3.5"
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-stone-600 mb-1">
+                            Username / Handle *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={editProfileForm.username}
+                            onChange={(e) =>
+                              setEditProfileForm((prev) => ({
+                                ...prev,
+                                username: e.target.value
+                                  .toLowerCase()
+                                  .replace(/[^a-z0-9_-]/g, ''),
+                              }))
+                            }
+                            className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs font-mono focus:outline-none focus:border-[#141413]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-stone-600 mb-1">
+                            Nama Tampilan *
+                          </label>
+                          <input
+                            type="text"
+                            required
+                            value={editProfileForm.displayName}
+                            onChange={(e) =>
+                              setEditProfileForm((prev) => ({
+                                ...prev,
+                                displayName: e.target.value,
+                              }))
+                            }
+                            className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                          />
+                        </div>
                       </div>
-                      {inspectDetail.user.adminWarning && (
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-stone-600 mb-1">
+                            Email Akun *
+                          </label>
+                          <input
+                            type="email"
+                            required
+                            value={editProfileForm.email}
+                            onChange={(e) =>
+                              setEditProfileForm((prev) => ({
+                                ...prev,
+                                email: e.target.value,
+                              }))
+                            }
+                            className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-stone-600 mb-1">
+                            URL Foto Profil (Avatar)
+                          </label>
+                          <input
+                            type="text"
+                            value={editProfileForm.avatarUrl}
+                            onChange={(e) =>
+                              setEditProfileForm((prev) => ({
+                                ...prev,
+                                avatarUrl: e.target.value,
+                              }))
+                            }
+                            placeholder="https://..."
+                            className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-medium text-stone-600 mb-1">
+                          Bio Profil
+                        </label>
+                        <textarea
+                          rows={2}
+                          value={editProfileForm.bio}
+                          onChange={(e) =>
+                            setEditProfileForm((prev) => ({
+                              ...prev,
+                              bio: e.target.value,
+                            }))
+                          }
+                          className="w-full p-2.5 rounded-xl border border-stone-200 text-xs resize-none focus:outline-none focus:border-[#141413]"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-stone-600 mb-1">
+                            Nomor WhatsApp
+                          </label>
+                          <input
+                            type="text"
+                            value={editProfileForm.whatsappNumber}
+                            onChange={(e) =>
+                              setEditProfileForm((prev) => ({
+                                ...prev,
+                                whatsappNumber: e.target.value,
+                              }))
+                            }
+                            placeholder="6281234567890"
+                            className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-stone-600 mb-1">
+                            Email Kontak Publik
+                          </label>
+                          <input
+                            type="email"
+                            value={editProfileForm.contactEmail}
+                            onChange={(e) =>
+                              setEditProfileForm((prev) => ({
+                                ...prev,
+                                contactEmail: e.target.value,
+                              }))
+                            }
+                            placeholder="kontak@domain.com"
+                            className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-stone-100">
+                        <div>
+                          <label className="block text-xs font-medium text-stone-600 mb-1">
+                            SEO Title Kustom
+                          </label>
+                          <input
+                            type="text"
+                            value={editProfileForm.seoTitle}
+                            onChange={(e) =>
+                              setEditProfileForm((prev) => ({
+                                ...prev,
+                                seoTitle: e.target.value,
+                              }))
+                            }
+                            className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-stone-600 mb-1">
+                            SEO Description Kustom
+                          </label>
+                          <input
+                            type="text"
+                            value={editProfileForm.seoDescription}
+                            onChange={(e) =>
+                              setEditProfileForm((prev) => ({
+                                ...prev,
+                                seoDescription: e.target.value,
+                              }))
+                            }
+                            className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                          />
+                        </div>
+                      </div>
+
+                      <label className="inline-flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={editProfileForm.hideBranding}
+                          onChange={(e) =>
+                            setEditProfileForm((prev) => ({
+                              ...prev,
+                              hideBranding: e.target.checked,
+                            }))
+                          }
+                          className="w-4 h-4 rounded border-stone-300 accent-[#141413]"
+                        />
+                        <span>
+                          Sembunyikan branding &quot;Dibuat dengan LokaBio&quot; (aktif bila paket Pro)
+                        </span>
+                      </label>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-stone-100">
                         <button
                           type="button"
-                          disabled={inspectSaving}
-                          onClick={() => handleSaveInspectWarning(true)}
-                          className="text-[11px] font-semibold text-red-700 hover:underline"
+                          disabled={resetLinkBusy}
+                          onClick={handleGenerateResetLink}
+                          className="min-h-[40px] px-3.5 py-2 rounded-xl border border-stone-200 bg-stone-50 text-xs font-medium text-[#141413] hover:bg-stone-100 disabled:opacity-50 inline-flex items-center gap-1.5"
                         >
-                          Hapus Peringatan
+                          <KeyRound className="w-3.5 h-3.5 text-[#D97757]" />
+                          <span>
+                            {resetLinkBusy
+                              ? 'Membuat tautan...'
+                              : 'Buat Link Reset Password'}
+                          </span>
                         </button>
+
+                        <button
+                          type="submit"
+                          disabled={inspectSaving}
+                          className="min-h-[40px] px-5 py-2 rounded-xl bg-[#D97757] text-white text-xs font-semibold hover:bg-[#c56647] disabled:opacity-50"
+                        >
+                          {inspectSaving
+                            ? 'Menyimpan...'
+                            : 'Simpan Perubahan Data User'}
+                        </button>
+                      </div>
+
+                      {resetLinkResult && (
+                        <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs font-semibold text-amber-900">
+                              Tautan Reset Password ({resetLinkResult.email})
+                            </p>
+                            <button
+                              type="button"
+                              onClick={handleCopyResetLink}
+                              className="min-h-[28px] px-2.5 py-1 rounded-lg bg-[#141413] text-white text-[11px] font-medium hover:bg-stone-800 inline-flex items-center gap-1"
+                            >
+                              <Copy className="w-3 h-3" />
+                              <span>Salin</span>
+                            </button>
+                          </div>
+                          <input
+                            type="text"
+                            readOnly
+                            value={resetLinkResult.resetLink}
+                            onFocus={(e) => e.currentTarget.select()}
+                            className="w-full px-2.5 py-1.5 rounded-lg border border-amber-200 bg-white text-[11px] font-mono text-stone-700"
+                          />
+                        </div>
                       )}
-                    </div>
-                    <textarea
-                      rows={2}
-                      value={warningInput}
-                      onChange={(e) => setWarningInput(e.target.value)}
-                      placeholder="Tulis teguran atau pemberitahuan resmi yang hanya muncul di Studio milik kreator ini..."
-                      className="w-full p-2.5 rounded-xl border border-stone-200 bg-white text-xs resize-none focus:outline-none focus:border-[#141413]"
-                    />
-                    <div className="flex justify-end">
-                      <button
-                        type="button"
-                        disabled={inspectSaving || !warningInput.trim()}
-                        onClick={() => handleSaveInspectWarning(false)}
-                        className="min-h-[34px] px-3.5 py-1 rounded-xl bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-45"
-                      >
-                        Kirim Peringatan
-                      </button>
-                    </div>
-                  </div>
+                    </form>
+                  )}
 
-                  {/* Force Rename Handle */}
-                  <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 space-y-2.5">
-                    <label className="block text-xs font-semibold text-[#141413]">
-                      Ubah Paksa Handle / Username
-                    </label>
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      <input
-                        type="text"
-                        value={forceUsernameInput}
-                        onChange={(e) =>
-                          setForceUsernameInput(
-                            e.target.value
-                              .toLowerCase()
-                              .replace(/[^a-z0-9_-]/g, '')
-                          )
-                        }
-                        className="flex-1 min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs font-mono focus:outline-none focus:border-[#141413]"
-                      />
-                      <button
-                        type="button"
-                        disabled={
-                          inspectSaving ||
-                          !forceUsernameInput.trim() ||
-                          forceUsernameInput === inspectDetail.user.username
-                        }
-                        onClick={handleForceRename}
-                        className="min-h-[38px] px-4 py-1.5 rounded-xl bg-[#141413] text-white text-xs font-medium hover:bg-stone-800 disabled:opacity-45 whitespace-nowrap"
-                      >
-                        Simpan Handle Baru
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Links Moderation List */}
-                  <div className="space-y-2.5">
-                    <h3 className="text-sm font-semibold">
-                      Daftar Tautan &amp; Produk ({inspectDetail.links.length})
-                    </h3>
-                    {inspectDetail.links.length === 0 ? (
-                      <p className="text-xs text-stone-500 py-4">
-                        Pengguna ini belum memiliki tautan.
-                      </p>
-                    ) : (
-                      <div className="divide-y divide-stone-100 border border-stone-200 rounded-xl px-4">
-                        {inspectDetail.links.map((l) => (
-                          <div
-                            key={l.id}
-                            className={`py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
-                              !l.isActive ? 'opacity-55' : ''
-                            }`}
+                  {inspectTab === 'plan' && (
+                    <div className="space-y-4">
+                      {/* Paket & Kuota Kreator */}
+                      <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-3">
+                        <div className="flex items-center gap-2">
+                          <Crown className="w-4 h-4 text-amber-700" />
+                          <label className="text-xs font-semibold text-[#141413]">
+                            Paket &amp; Masa Aktif Langganan
+                          </label>
+                        </div>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                          <select
+                            value={planTierInput}
+                            onChange={(e) =>
+                              setPlanTierInput(e.target.value as PlanTier)
+                            }
+                            className="min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs font-medium focus:outline-none focus:border-[#141413]"
                           >
-                            <div className="min-w-0 space-y-0.5">
-                              <div className="flex flex-wrap items-center gap-1.5">
-                                <p className="text-xs font-semibold text-[#141413] truncate">
-                                  {l.title}{' '}
-                                  <span className="font-normal text-stone-400">
-                                    ({l.linkType})
-                                  </span>
-                                </p>
-                                {l.flaggedReason && (
-                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-red-50 border border-red-200 text-[10px] font-semibold text-red-700">
-                                    <ShieldAlert className="w-3 h-3" />
-                                    {l.flaggedReason}
-                                  </span>
-                                )}
-                              </div>
-                              {l.url && (
-                                <a
-                                  href={l.url}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-[11px] text-[#D97757] hover:underline break-all block"
-                                >
-                                  {l.url}
-                                </a>
-                              )}
-                              <p className="text-[11px] text-stone-500 tabular-nums">
-                                {l.clicks} klik ·{' '}
-                                {l.isActive ? 'Aktif' : 'Dinonaktifkan Admin'}
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                type="button"
-                                disabled={inspectSaving}
-                                onClick={() =>
-                                  handleModerateLink(l.id, !l.isActive)
+                            <option value="free">
+                              Paket Free (Maks {settings.freeLinkLimit} tautan)
+                            </option>
+                            <option value="pro">
+                              Paket Pro (Tautan tak terbatas + Hapus Branding)
+                            </option>
+                          </select>
+                          {planTierInput === 'pro' && (
+                            <input
+                              type="date"
+                              value={planExpiresAtInput}
+                              onChange={(e) =>
+                                setPlanExpiresAtInput(e.target.value)
+                              }
+                              title="Kosongkan untuk Pro permanen"
+                              className="min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                            />
+                          )}
+                          <button
+                            type="button"
+                            disabled={inspectSaving}
+                            onClick={handleSaveInspectPlan}
+                            className="min-h-[38px] px-4 py-1.5 rounded-xl bg-[#141413] text-white text-xs font-medium hover:bg-stone-800 disabled:opacity-45 whitespace-nowrap"
+                          >
+                            Simpan Paket
+                          </button>
+                        </div>
+                        {planTierInput === 'pro' && (
+                          <p className="text-[11px] text-stone-500">
+                            Kosongkan tanggal kedaluwarsa jika ingin memberikan paket Pro tanpa batas waktu.
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Peringatan Khusus Akun */}
+                      <div className="p-4 rounded-xl bg-red-50/60 border border-red-200 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <AlertTriangle className="w-4 h-4 text-red-600" />
+                            <label className="text-xs font-semibold text-[#141413]">
+                              Peringatan / Notifikasi Khusus ke Studio Pengguna
+                            </label>
+                          </div>
+                          {inspectDetail.user.adminWarning && (
+                            <button
+                              type="button"
+                              disabled={inspectSaving}
+                              onClick={() => handleSaveInspectWarning(true)}
+                              className="text-[11px] font-semibold text-red-700 hover:underline"
+                            >
+                              Hapus Peringatan
+                            </button>
+                          )}
+                        </div>
+                        <textarea
+                          rows={2}
+                          value={warningInput}
+                          onChange={(e) => setWarningInput(e.target.value)}
+                          placeholder="Tulis teguran atau pemberitahuan resmi yang hanya muncul di Studio milik kreator ini..."
+                          className="w-full p-2.5 rounded-xl border border-stone-200 bg-white text-xs resize-none focus:outline-none focus:border-[#141413]"
+                        />
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            disabled={inspectSaving || !warningInput.trim()}
+                            onClick={() => handleSaveInspectWarning(false)}
+                            className="min-h-[34px] px-3.5 py-1 rounded-xl bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-45"
+                          >
+                            Kirim Peringatan
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {inspectTab === 'links' && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold">
+                          Daftar Tautan &amp; Produk ({inspectDetail.links.length})
+                        </h3>
+                        <button
+                          type="button"
+                          onClick={() => setAdminAddLinkOpen((v) => !v)}
+                          className="min-h-[34px] px-3 py-1 rounded-xl bg-[#141413] text-white text-xs font-medium hover:bg-stone-800 inline-flex items-center gap-1.5"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>
+                            {adminAddLinkOpen ? 'Tutup Form' : 'Tambah Tautan'}
+                          </span>
+                        </button>
+                      </div>
+
+                      {adminAddLinkOpen && (
+                        <form
+                          onSubmit={handleAdminCreateLink}
+                          className="p-4 rounded-xl bg-stone-50 border border-stone-200 space-y-2.5"
+                        >
+                          <p className="text-xs font-semibold text-[#141413]">
+                            Tambah Tautan Langsung untuk @{inspectDetail.user.username}
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <div>
+                              <label className="block text-[11px] text-stone-600 mb-1">
+                                Tipe Blok
+                              </label>
+                              <select
+                                value={adminAddLinkForm.linkType}
+                                onChange={(e) =>
+                                  setAdminAddLinkForm((prev) => ({
+                                    ...prev,
+                                    linkType: e.target.value,
+                                  }))
                                 }
-                                className="min-h-[34px] px-2.5 py-1 rounded-lg border border-stone-200 bg-white text-xs font-medium hover:bg-stone-50 inline-flex items-center gap-1 whitespace-nowrap"
+                                className="w-full min-h-[36px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs"
                               >
-                                {l.isActive ? (
-                                  <>
-                                    <EyeOff className="w-3.5 h-3.5" />
-                                    <span>Nonaktifkan</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Eye className="w-3.5 h-3.5" />
-                                    <span>Aktifkan</span>
-                                  </>
-                                )}
-                              </button>
-                              <button
-                                type="button"
-                                disabled={inspectSaving}
-                                onClick={() => handleDeleteUserLink(l.id)}
-                                className="min-h-[34px] px-2.5 py-1 rounded-lg border border-red-200 bg-white text-xs font-medium text-red-700 hover:bg-red-50 inline-flex items-center gap-1"
+                                {LINK_TYPE_OPTIONS.map((opt) => (
+                                  <option key={opt.id} value={opt.id}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-stone-600 mb-1">
+                                Ikon
+                              </label>
+                              <select
+                                value={adminAddLinkForm.icon}
+                                onChange={(e) =>
+                                  setAdminAddLinkForm((prev) => ({
+                                    ...prev,
+                                    icon: e.target.value,
+                                  }))
+                                }
+                                className="w-full min-h-[36px] px-2.5 rounded-xl border border-stone-200 bg-white text-xs"
                               >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                <span>Hapus</span>
-                              </button>
+                                {LINK_ICON_OPTIONS.map((opt) => (
+                                  <option key={opt.id} value={opt.id}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
                             </div>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                            <div>
+                              <label className="block text-[11px] text-stone-600 mb-1">
+                                Judul Tautan *
+                              </label>
+                              <input
+                                type="text"
+                                required
+                                value={adminAddLinkForm.title}
+                                onChange={(e) =>
+                                  setAdminAddLinkForm((prev) => ({
+                                    ...prev,
+                                    title: e.target.value,
+                                  }))
+                                }
+                                placeholder="Contoh: Katalog Shopee Resmi"
+                                className="w-full min-h-[36px] px-3 rounded-xl border border-stone-200 bg-white text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-stone-600 mb-1">
+                                URL Tujuan
+                              </label>
+                              <input
+                                type="text"
+                                value={adminAddLinkForm.url}
+                                onChange={(e) =>
+                                  setAdminAddLinkForm((prev) => ({
+                                    ...prev,
+                                    url: e.target.value,
+                                  }))
+                                }
+                                placeholder="https://..."
+                                className="w-full min-h-[36px] px-3 rounded-xl border border-stone-200 bg-white text-xs"
+                              />
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                            <div>
+                              <label className="block text-[11px] text-stone-600 mb-1">
+                                Subjudul (Opsional)
+                              </label>
+                              <input
+                                type="text"
+                                value={adminAddLinkForm.subtitle}
+                                onChange={(e) =>
+                                  setAdminAddLinkForm((prev) => ({
+                                    ...prev,
+                                    subtitle: e.target.value,
+                                  }))
+                                }
+                                className="w-full min-h-[36px] px-3 rounded-xl border border-stone-200 bg-white text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-stone-600 mb-1">
+                                Harga Produk
+                              </label>
+                              <input
+                                type="text"
+                                value={adminAddLinkForm.priceText}
+                                onChange={(e) =>
+                                  setAdminAddLinkForm((prev) => ({
+                                    ...prev,
+                                    priceText: e.target.value,
+                                  }))
+                                }
+                                placeholder="Rp 49.000"
+                                className="w-full min-h-[36px] px-3 rounded-xl border border-stone-200 bg-white text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-stone-600 mb-1">
+                                Badge
+                              </label>
+                              <input
+                                type="text"
+                                value={adminAddLinkForm.badgeText}
+                                onChange={(e) =>
+                                  setAdminAddLinkForm((prev) => ({
+                                    ...prev,
+                                    badgeText: e.target.value,
+                                  }))
+                                }
+                                placeholder="Promo"
+                                className="w-full min-h-[36px] px-3 rounded-xl border border-stone-200 bg-white text-xs"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex justify-end pt-1">
+                            <button
+                              type="submit"
+                              disabled={inspectSaving}
+                              className="min-h-[36px] px-4 py-1.5 rounded-xl bg-[#D97757] text-white text-xs font-semibold hover:bg-[#c56647] disabled:opacity-50"
+                            >
+                              {inspectSaving
+                                ? 'Menyimpan...'
+                                : 'Simpan Tautan Baru'}
+                            </button>
+                          </div>
+                        </form>
+                      )}
+
+                      {inspectDetail.links.length === 0 ? (
+                        <p className="text-xs text-stone-500 py-4">
+                          Pengguna ini belum memiliki tautan.
+                        </p>
+                      ) : (
+                        <div className="divide-y divide-stone-100 border border-stone-200 rounded-xl px-4">
+                          {inspectDetail.links.map((l) => {
+                            const isEditingThis = adminEditLinkId === l.id;
+                            return (
+                              <div key={l.id} className="py-3 space-y-2.5">
+                                <div
+                                  className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 ${
+                                    !l.isActive ? 'opacity-55' : ''
+                                  }`}
+                                >
+                                  <div className="min-w-0 space-y-0.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <p className="text-xs font-semibold text-[#141413] truncate">
+                                        {l.title}{' '}
+                                        <span className="font-normal text-stone-400">
+                                          ({l.linkType})
+                                        </span>
+                                      </p>
+                                      {l.flaggedReason && (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-red-50 border border-red-200 text-[10px] font-semibold text-red-700">
+                                          <ShieldAlert className="w-3 h-3" />
+                                          {l.flaggedReason}
+                                        </span>
+                                      )}
+                                    </div>
+                                    {l.url && (
+                                      <a
+                                        href={l.url}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-[11px] text-[#D97757] hover:underline break-all block"
+                                      >
+                                        {l.url}
+                                      </a>
+                                    )}
+                                    <p className="text-[11px] text-stone-500 tabular-nums">
+                                      {l.clicks} klik ·{' '}
+                                      {l.isActive
+                                        ? 'Aktif'
+                                        : 'Dinonaktifkan Admin'}
+                                    </p>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                    <button
+                                      type="button"
+                                      disabled={inspectSaving}
+                                      onClick={() =>
+                                        isEditingThis
+                                          ? setAdminEditLinkId(null)
+                                          : startAdminEditLink(l)
+                                      }
+                                      className="min-h-[34px] px-2.5 py-1 rounded-lg border border-stone-200 bg-white text-xs font-medium hover:bg-stone-50 inline-flex items-center gap-1 whitespace-nowrap"
+                                    >
+                                      <Edit3 className="w-3.5 h-3.5" />
+                                      <span>
+                                        {isEditingThis ? 'Tutup' : 'Edit'}
+                                      </span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={inspectSaving}
+                                      onClick={() =>
+                                        handleModerateLink(l.id, !l.isActive)
+                                      }
+                                      className="min-h-[34px] px-2.5 py-1 rounded-lg border border-stone-200 bg-white text-xs font-medium hover:bg-stone-50 inline-flex items-center gap-1 whitespace-nowrap"
+                                    >
+                                      {l.isActive ? (
+                                        <>
+                                          <EyeOff className="w-3.5 h-3.5" />
+                                          <span>Nonaktifkan</span>
+                                        </>
+                                      ) : (
+                                        <>
+                                          <Eye className="w-3.5 h-3.5" />
+                                          <span>Aktifkan</span>
+                                        </>
+                                      )}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={inspectSaving}
+                                      onClick={() => handleDeleteUserLink(l.id)}
+                                      className="min-h-[34px] px-2.5 py-1 rounded-lg border border-red-200 bg-white text-xs font-medium text-red-700 hover:bg-red-50 inline-flex items-center gap-1"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                      <span>Hapus</span>
+                                    </button>
+                                  </div>
+                                </div>
+
+                                {isEditingThis && (
+                                  <form
+                                    onSubmit={handleAdminUpdateLink}
+                                    className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2"
+                                  >
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                      <input
+                                        type="text"
+                                        required
+                                        value={adminEditLinkForm.title}
+                                        onChange={(e) =>
+                                          setAdminEditLinkForm((prev) => ({
+                                            ...prev,
+                                            title: e.target.value,
+                                          }))
+                                        }
+                                        placeholder="Judul tautan"
+                                        className="min-h-[34px] px-2.5 rounded-lg border border-stone-200 bg-white text-xs"
+                                      />
+                                      <input
+                                        type="text"
+                                        value={adminEditLinkForm.url}
+                                        onChange={(e) =>
+                                          setAdminEditLinkForm((prev) => ({
+                                            ...prev,
+                                            url: e.target.value,
+                                          }))
+                                        }
+                                        placeholder="URL tujuan"
+                                        className="min-h-[34px] px-2.5 rounded-lg border border-stone-200 bg-white text-xs"
+                                      />
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                      <input
+                                        type="text"
+                                        value={adminEditLinkForm.subtitle}
+                                        onChange={(e) =>
+                                          setAdminEditLinkForm((prev) => ({
+                                            ...prev,
+                                            subtitle: e.target.value,
+                                          }))
+                                        }
+                                        placeholder="Subjudul"
+                                        className="min-h-[34px] px-2.5 rounded-lg border border-stone-200 bg-white text-xs"
+                                      />
+                                      <input
+                                        type="text"
+                                        value={adminEditLinkForm.priceText}
+                                        onChange={(e) =>
+                                          setAdminEditLinkForm((prev) => ({
+                                            ...prev,
+                                            priceText: e.target.value,
+                                          }))
+                                        }
+                                        placeholder="Harga (opsional)"
+                                        className="min-h-[34px] px-2.5 rounded-lg border border-stone-200 bg-white text-xs"
+                                      />
+                                      <input
+                                        type="text"
+                                        value={adminEditLinkForm.badgeText}
+                                        onChange={(e) =>
+                                          setAdminEditLinkForm((prev) => ({
+                                            ...prev,
+                                            badgeText: e.target.value,
+                                          }))
+                                        }
+                                        placeholder="Badge (opsional)"
+                                        className="min-h-[34px] px-2.5 rounded-lg border border-stone-200 bg-white text-xs"
+                                      />
+                                    </div>
+                                    <div className="flex justify-end gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => setAdminEditLinkId(null)}
+                                        className="min-h-[32px] px-3 rounded-lg border border-stone-200 bg-white text-xs text-stone-600"
+                                      >
+                                        Batal
+                                      </button>
+                                      <button
+                                        type="submit"
+                                        disabled={inspectSaving}
+                                        className="min-h-[32px] px-3.5 rounded-lg bg-[#141413] text-white text-xs font-semibold hover:bg-stone-800 disabled:opacity-50"
+                                      >
+                                        Simpan
+                                      </button>
+                                    </div>
+                                  </form>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </>
               )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Tambah Akun User Baru Modal */}
+      <AnimatePresence>
+        {createUserOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              className="w-full max-w-xl max-h-[88vh] overflow-y-auto bg-white rounded-2xl border border-stone-200 p-6 space-y-5 shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-9 h-9 rounded-xl bg-[#D97757]/10 text-[#D97757] flex items-center justify-center shrink-0">
+                    <UserPlus className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h2 className="font-display text-lg font-bold">
+                      Tambah Akun User Baru
+                    </h2>
+                    <p className="text-xs text-stone-500">
+                      Buat profil pengguna baru langsung dari panel Super Admin.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setCreateUserOpen(false)}
+                  className="p-2 rounded-lg hover:bg-stone-100 text-stone-500"
+                  aria-label="Tutup form tambah user"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleCreateUser} className="space-y-3.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Nama Tampilan *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={createUserForm.displayName}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          displayName: e.target.value,
+                        }))
+                      }
+                      placeholder="Contoh: Kopi Nusantara"
+                      className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Username / Handle *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={createUserForm.username}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          username: e.target.value
+                            .toLowerCase()
+                            .replace(/[^a-z0-9_-]/g, ''),
+                        }))
+                      }
+                      placeholder="kopinusantara"
+                      className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs font-mono focus:outline-none focus:border-[#141413]"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Email *
+                    </label>
+                    <input
+                      type="email"
+                      required
+                      value={createUserForm.email}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          email: e.target.value,
+                        }))
+                      }
+                      placeholder="kreator@domain.com"
+                      className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Password Awal (Opsional)
+                    </label>
+                    <input
+                      type="password"
+                      minLength={6}
+                      value={createUserForm.password}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          password: e.target.value,
+                        }))
+                      }
+                      placeholder="Min. 6 karakter / kosongkan"
+                      className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                    />
+                  </div>
+                </div>
+
+                <p className="text-[11px] text-stone-500 bg-stone-50 border border-stone-200 rounded-xl px-3 py-2">
+                  Kosongkan password untuk membuat profil pra-registrasi (otomatis terhubung saat user login Google atau mendaftar dengan email tersebut). Isi password bila server terhubung dengan Firebase Admin Service Account.
+                </p>
+
+                <div>
+                  <label className="block text-xs font-medium text-stone-600 mb-1">
+                    Bio Singkat
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={createUserForm.bio}
+                    onChange={(e) =>
+                      setCreateUserForm((prev) => ({
+                        ...prev,
+                        bio: e.target.value,
+                      }))
+                    }
+                    placeholder="Deskripsi singkat profil kreator/UMKM..."
+                    className="w-full p-2.5 rounded-xl border border-stone-200 text-xs resize-none focus:outline-none focus:border-[#141413]"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Peran Akun
+                    </label>
+                    <select
+                      value={createUserForm.role}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          role: e.target.value === 'admin' ? 'admin' : 'user',
+                        }))
+                      }
+                      className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                    >
+                      <option value="user">User (Kreator)</option>
+                      <option value="admin">Super Admin</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Paket Awal
+                    </label>
+                    <select
+                      value={createUserForm.planTier}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          planTier: e.target.value === 'pro' ? 'pro' : 'free',
+                        }))
+                      }
+                      className="w-full min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                    >
+                      <option value="free">Paket Free</option>
+                      <option value="pro">Paket Pro</option>
+                    </select>
+                  </div>
+                </div>
+
+                {createUserForm.planTier === 'pro' && (
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Masa Aktif Pro (Opsional)
+                    </label>
+                    <input
+                      type="date"
+                      value={createUserForm.planExpiresAt}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          planExpiresAt: e.target.value,
+                        }))
+                      }
+                      className="w-full sm:w-56 min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                    />
+                  </div>
+                )}
+
+                <div className="flex flex-wrap gap-4 pt-1">
+                  <label className="inline-flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={createUserForm.isVerified}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          isVerified: e.target.checked,
+                        }))
+                      }
+                      className="w-4 h-4 rounded border-stone-300 accent-[#141413]"
+                    />
+                    <span>Beri Centang Verifikasi</span>
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-xs text-stone-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={createUserForm.isFeatured}
+                      onChange={(e) =>
+                        setCreateUserForm((prev) => ({
+                          ...prev,
+                          isFeatured: e.target.checked,
+                        }))
+                      }
+                      className="w-4 h-4 rounded border-stone-300 accent-[#141413]"
+                    />
+                    <span>Tampilkan di Pratinjau Beranda</span>
+                  </label>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-2 border-t border-stone-100">
+                  <button
+                    type="button"
+                    onClick={() => setCreateUserOpen(false)}
+                    className="min-h-[40px] px-4 py-2 rounded-xl border border-stone-200 text-xs font-medium text-stone-600 hover:bg-stone-50"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={createUserBusy}
+                    className="min-h-[40px] px-5 py-2 rounded-xl bg-[#141413] text-white text-xs font-semibold hover:bg-stone-800 disabled:opacity-50"
+                  >
+                    {createUserBusy ? 'Menyimpan...' : 'Buat Akun User'}
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </motion.div>
         )}

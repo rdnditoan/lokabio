@@ -238,6 +238,55 @@ export const platformSettings = pgTable('platform_settings', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const promoCoupons = pgTable('promo_coupons', {
+  id: serial('id').primaryKey(),
+  code: text('code').notNull().unique(),
+  description: text('description').notNull().default(''),
+  durationDays: integer('duration_days').notNull().default(30), // 0 = selamanya
+  maxUses: integer('max_uses').notNull().default(100),
+  usedCount: integer('used_count').notNull().default(0),
+  isActive: boolean('is_active').notNull().default(true),
+  expiresAt: timestamp('expires_at'),
+  createdBy: text('created_by').notNull().default(''),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const proSubscriptionsLog = pgTable('pro_subscriptions_log', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id')
+    .references(() => users.id, { onDelete: 'cascade' })
+    .notNull(),
+  username: text('username').notNull(),
+  source: text('source').notNull(), // 'coupon' | 'admin_manual' | 'bulk_admin'
+  couponCode: text('coupon_code').notNull().default(''),
+  planTier: text('plan_tier').notNull().default('pro'),
+  durationDays: integer('duration_days'),
+  expiresAt: timestamp('expires_at'),
+  actorEmail: text('actor_email').notNull().default(''),
+  note: text('note').notNull().default(''),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+});
+
+export const themeTemplates = pgTable('theme_templates', {
+  id: serial('id').primaryKey(),
+  slug: text('slug').notNull().unique(),
+  name: text('name').notNull(),
+  description: text('description').notNull().default(''),
+  bgType: text('bg_type').notNull().default('solid'),
+  bgColor: text('bg_color').notNull().default('#F6F5F1'),
+  bgGradient: text('bg_gradient').notNull().default(''),
+  buttonColor: text('button_color').notNull().default('#141413'),
+  buttonTextColor: text('button_text_color').notNull().default('#FAF9F6'),
+  buttonShape: text('button_shape').notNull().default('rounded'),
+  textColor: text('text_color').notNull().default('#141413'),
+  fontFamily: text('font_family').notNull().default('sans'),
+  isActive: boolean('is_active').notNull().default(true),
+  isProOnly: boolean('is_pro_only').notNull().default(false),
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+});
+
 export const usersRelations = relations(users, ({ many }) => ({
   links: many(links),
   clickEvents: many(clickEvents),
@@ -245,6 +294,7 @@ export const usersRelations = relations(users, ({ many }) => ({
   inquiries: many(inquiries),
   profileReports: many(profileReports),
   verificationRequests: many(verificationRequests),
+  proSubscriptionsLog: many(proSubscriptionsLog),
 }));
 
 export const linksRelations = relations(links, ({ one, many }) => ({
@@ -297,6 +347,16 @@ export const verificationRequestsRelations = relations(
   })
 );
 
+export const proSubscriptionsLogRelations = relations(
+  proSubscriptionsLog,
+  ({ one }) => ({
+    user: one(users, {
+      fields: [proSubscriptionsLog.userId],
+      references: [users.id],
+    }),
+  })
+);
+
 export type UserRecord = typeof users.$inferSelect;
 export type NewUserRecord = typeof users.$inferInsert;
 export type LinkRecord = typeof links.$inferSelect;
@@ -308,3 +368,6 @@ export type AdminAuditLogRecord = typeof adminAuditLogs.$inferSelect;
 export type ProfileReportRecord = typeof profileReports.$inferSelect;
 export type VerificationRequestRecord = typeof verificationRequests.$inferSelect;
 export type PlatformSettingsRecord = typeof platformSettings.$inferSelect;
+export type PromoCouponRecord = typeof promoCoupons.$inferSelect;
+export type ProSubscriptionLogRecord = typeof proSubscriptionsLog.$inferSelect;
+export type ThemeTemplateRecord = typeof themeTemplates.$inferSelect;

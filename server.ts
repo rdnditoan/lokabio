@@ -7,21 +7,27 @@ import { createServer as createViteServer } from 'vite';
 import { type AuthRequest, requireAuth, requireSuperAdmin } from './src/middleware/auth.ts';
 import {
   createUserLink,
+  csvCellSafe,
   deleteUserInquiry,
   deleteUserLink,
   deleteUserSubscriber,
   detectDeviceType,
   dismissUserAdminWarning,
   duplicateUserLink,
+  exportPlatformBackup,
   getAdminAuditLogs,
+  getAdminCouponsAndHistory,
   getAdminReports,
   getAdminUserDetail,
   getAdminVerificationRequests,
   getAdminWorkspaceByUid,
+  getAdminWorkspacePreviewById,
   getAllUsernamesForSitemap,
+  getAuditLogsForExport,
   getFeaturedProfiles,
   getOrCreatePlatformSettings,
   getOrCreateUser,
+  getOrSeedThemeTemplates,
   getPlatformAdminOverview,
   getPlatformGlobalAnalytics,
   getPublicPlatformStatus,
@@ -32,20 +38,32 @@ import {
   incrementProfileViews,
   isUsernameAvailable,
   markUserInquiryRead,
+  redeemPromoCouponForUser,
   reorderUserLinks,
+  restorePlatformBackup,
   submitProfileInquiry,
   submitProfileReport,
   submitVerificationRequest,
   subscribeToProfile,
   superAdminBulkUsersAction,
   superAdminCleanupClickEvents,
+  superAdminCreateCoupon,
+  superAdminCreateThemeTemplate,
+  superAdminCreateUser,
+  superAdminCreateUserLink,
+  superAdminDeleteCoupon,
   superAdminDeleteLink,
+  superAdminDeleteThemeTemplate,
   superAdminDeleteUser,
+  superAdminGeneratePasswordResetLink,
   superAdminModerateLink,
   superAdminReviewReport,
   superAdminReviewVerification,
+  superAdminUpdateCoupon,
   superAdminUpdateFeaturedOrder,
+  superAdminUpdateLink,
   superAdminUpdatePlatformSettings,
+  superAdminUpdateThemeTemplate,
   superAdminUpdateUser,
   toPublicLinkDTO,
   unlockPinProtectedLink,
@@ -208,6 +226,17 @@ async function startServer() {
         error instanceof Error
           ? error.message
           : 'Gagal memuat status platform.';
+      res.status(500).json({ error: message });
+    }
+  });
+
+  app.get('/api/public/themes', async (_req: Request, res: Response) => {
+    try {
+      const themes = await getOrSeedThemeTemplates(true);
+      res.json({ themes });
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error ? error.message : 'Gagal memuat template tema.';
       res.status(500).json({ error: message });
     }
   });
@@ -398,9 +427,10 @@ async function startServer() {
       if (!workspace) {
         return res.status(404).json({ error: 'Workspace tidak ditemukan.' });
       }
-      const [settings, verificationRequest] = await Promise.all([
+      const [settings, verificationRequest, themeTemplates] = await Promise.all([
         getOrCreatePlatformSettings(),
         getUserLatestVerificationRequest(workspace.user.id),
+        getOrSeedThemeTemplates(true),
       ]);
       res.json({
         ...workspace,
@@ -414,6 +444,7 @@ async function startServer() {
           freeLinkLimit: settings.freeLinkLimit,
         },
         verificationRequest,
+        themeTemplates,
       });
     } catch (error: unknown) {
       const message =
@@ -422,6 +453,22 @@ async function startServer() {
       res.status(status).json({ error: message });
     }
   });
+
+  app.post(
+    '/api/admin/coupons/redeem',
+    requireAuth,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const code = String(req.body?.code || '');
+        const result = await redeemPromoCouponForUser(req.user!.uid, code);
+        res.json(result);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Gagal menukarkan kupon.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
 
   app.post(
     '/api/admin/warning/dismiss',
@@ -756,6 +803,60 @@ async function startServer() {
   );
 
   app.post(
+    '/api/superadmin/users',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const {
+          email,
+          password,
+          username,
+          displayName,
+          bio,
+          avatarUrl,
+          whatsappNumber,
+          contactEmail,
+          role,
+          planTier,
+          planExpiresAt,
+          isVerified,
+          isFeatured,
+        } = req.body || {};
+
+        const created = await superAdminCreateUser(
+          req.user!.uid,
+          req.user!.email || '',
+          {
+            email: String(email || ''),
+            password: typeof password === 'string' ? password : '',
+            username: String(username || ''),
+            displayName: String(displayName || ''),
+            bio: typeof bio === 'string' ? bio : '',
+            avatarUrl: typeof avatarUrl === 'string' ? avatarUrl : '',
+            whatsappNumber:
+              typeof whatsappNumber === 'string' ? whatsappNumber : '',
+            contactEmail: typeof contactEmail === 'string' ? contactEmail : '',
+            role: typeof role === 'string' ? role : 'user',
+            planTier: typeof planTier === 'string' ? planTier : 'free',
+            planExpiresAt: planExpiresAt ?? null,
+            isVerified: Boolean(isVerified),
+            isFeatured: Boolean(isFeatured),
+          }
+        );
+
+        res.status(201).json({ user: created });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal menambahkan akun pengguna baru.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
     '/api/superadmin/users/bulk',
     requireAuth,
     requireSuperAdmin,
@@ -799,6 +900,15 @@ async function startServer() {
           isFeatured,
           featuredOrder,
           newUsername,
+          displayName,
+          email,
+          bio,
+          avatarUrl,
+          whatsappNumber,
+          contactEmail,
+          seoTitle,
+          seoDescription,
+          hideBranding,
           planTier,
           planExpiresAt,
           adminWarning,
@@ -814,6 +924,15 @@ async function startServer() {
             isFeatured,
             featuredOrder,
             newUsername,
+            displayName,
+            email,
+            bio,
+            avatarUrl,
+            whatsappNumber,
+            contactEmail,
+            seoTitle,
+            seoDescription,
+            hideBranding,
             planTier,
             planExpiresAt,
             adminWarning,
@@ -826,7 +945,11 @@ async function startServer() {
         const status =
           message.includes('tidak dapat') ||
           message.includes('Username') ||
-          message.includes('sudah dipakai')
+          message.includes('sudah dipakai') ||
+          message.includes('tidak boleh kosong') ||
+          message.includes('email') ||
+          message.includes('protokol') ||
+          message.includes('avatar')
             ? 400
             : 500;
         res.status(status).json({ error: message });
@@ -1089,6 +1212,394 @@ async function startServer() {
             ? error.message
             : 'Gagal menyimpan pengaturan platform.';
         res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  // --- Super Admin Direct Link CRUD, Password Reset & Support Preview ---
+
+  app.post(
+    '/api/superadmin/users/:id/links',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const targetId = Number(req.params.id);
+        if (!Number.isFinite(targetId) || targetId <= 0) {
+          return res.status(400).json({ error: 'ID pengguna tidak valid.' });
+        }
+        const created = await superAdminCreateUserLink(
+          targetId,
+          req.user!.uid,
+          req.user!.email || '',
+          req.body || {}
+        );
+        res.status(201).json({ link: created });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal menambahkan tautan pengguna.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.put(
+    '/api/superadmin/links/:linkId',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const linkId = Number(req.params.linkId);
+        if (!Number.isFinite(linkId) || linkId <= 0) {
+          return res.status(400).json({ error: 'ID tautan tidak valid.' });
+        }
+        const updated = await superAdminUpdateLink(
+          linkId,
+          req.user!.uid,
+          req.user!.email || '',
+          req.body || {}
+        );
+        res.json({ link: updated });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal memperbarui tautan pengguna.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/superadmin/users/:id/reset-password',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const targetId = Number(req.params.id);
+        if (!Number.isFinite(targetId) || targetId <= 0) {
+          return res.status(400).json({ error: 'ID pengguna tidak valid.' });
+        }
+        const result = await superAdminGeneratePasswordResetLink(
+          targetId,
+          req.user!.uid,
+          req.user!.email || ''
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal membuat tautan reset password.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.get(
+    '/api/superadmin/users/:id/workspace-preview',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const targetId = Number(req.params.id);
+        if (!Number.isFinite(targetId) || targetId <= 0) {
+          return res.status(400).json({ error: 'ID pengguna tidak valid.' });
+        }
+        const workspace = await getAdminWorkspacePreviewById(
+          targetId,
+          req.user!.uid,
+          req.user!.email || ''
+        );
+        res.json(workspace);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal memuat pratinjau studio pengguna.';
+        res.status(404).json({ error: message });
+      }
+    }
+  );
+
+  // --- Super Admin Promo Coupons & Pro Upgrade History ---
+
+  app.get(
+    '/api/superadmin/coupons',
+    requireAuth,
+    requireSuperAdmin,
+    async (_req: AuthRequest, res: Response) => {
+      try {
+        const data = await getAdminCouponsAndHistory();
+        res.json(data);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal memuat data kupon & riwayat Pro.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/superadmin/coupons',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const coupon = await superAdminCreateCoupon(
+          req.user!.uid,
+          req.user!.email || '',
+          req.body || {}
+        );
+        res.status(201).json({ coupon });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Gagal membuat kupon promo.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.patch(
+    '/api/superadmin/coupons/:id',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const couponId = Number(req.params.id);
+        if (!Number.isFinite(couponId) || couponId <= 0) {
+          return res.status(400).json({ error: 'ID kupon tidak valid.' });
+        }
+        const coupon = await superAdminUpdateCoupon(
+          couponId,
+          req.user!.uid,
+          req.user!.email || '',
+          req.body || {}
+        );
+        res.json({ coupon });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Gagal memperbarui kupon.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/superadmin/coupons/:id',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const couponId = Number(req.params.id);
+        if (!Number.isFinite(couponId) || couponId <= 0) {
+          return res.status(400).json({ error: 'ID kupon tidak valid.' });
+        }
+        await superAdminDeleteCoupon(
+          couponId,
+          req.user!.uid,
+          req.user!.email || ''
+        );
+        res.json({ ok: true });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Gagal menghapus kupon.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  // --- Super Admin Curated Global Theme Templates ---
+
+  app.get(
+    '/api/superadmin/themes',
+    requireAuth,
+    requireSuperAdmin,
+    async (_req: AuthRequest, res: Response) => {
+      try {
+        const themes = await getOrSeedThemeTemplates(false);
+        res.json({ themes });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Gagal memuat template tema.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/superadmin/themes',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const theme = await superAdminCreateThemeTemplate(
+          req.user!.uid,
+          req.user!.email || '',
+          req.body || {}
+        );
+        res.status(201).json({ theme });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Gagal membuat template tema.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.put(
+    '/api/superadmin/themes/:id',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const themeId = Number(req.params.id);
+        if (!Number.isFinite(themeId) || themeId <= 0) {
+          return res.status(400).json({ error: 'ID template tema tidak valid.' });
+        }
+        const theme = await superAdminUpdateThemeTemplate(
+          themeId,
+          req.user!.uid,
+          req.user!.email || '',
+          req.body || {}
+        );
+        res.json({ theme });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal memperbarui template tema.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  app.delete(
+    '/api/superadmin/themes/:id',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const themeId = Number(req.params.id);
+        if (!Number.isFinite(themeId) || themeId <= 0) {
+          return res.status(400).json({ error: 'ID template tema tidak valid.' });
+        }
+        await superAdminDeleteThemeTemplate(
+          themeId,
+          req.user!.uid,
+          req.user!.email || ''
+        );
+        res.json({ ok: true });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal menghapus template tema.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
+  // --- Super Admin Audit Log Export & Platform Config Backup/Restore ---
+
+  app.get(
+    '/api/superadmin/audit-logs/export',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const format = String(req.query.format || 'csv').toLowerCase();
+        const action = typeof req.query.action === 'string' ? req.query.action : '';
+        const search = typeof req.query.q === 'string' ? req.query.q : '';
+        const logs = await getAuditLogsForExport({ action, search });
+        const stamp = new Date().toISOString().slice(0, 10);
+
+        if (format === 'json') {
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.setHeader(
+            'Content-Disposition',
+            `attachment; filename="lokabio-audit-logs-${stamp}.json"`
+          );
+          return res.send(JSON.stringify({ exportedAt: new Date().toISOString(), logs }, null, 2));
+        }
+
+        const header = ['ID', 'Timestamp', 'AdminEmail', 'Action', 'TargetUsername', 'Details'];
+        const csvLines = [
+          header.join(','),
+          ...logs.map((l) =>
+            [
+              l.id,
+              csvCellSafe(new Date(l.createdAt).toISOString()),
+              csvCellSafe(l.adminEmail),
+              csvCellSafe(l.action),
+              csvCellSafe(l.targetUsername),
+              csvCellSafe(l.details),
+            ].join(',')
+          ),
+        ];
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="lokabio-audit-logs-${stamp}.csv"`
+        );
+        return res.send(csvLines.join('\n'));
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : 'Gagal mengekspor audit log.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.get(
+    '/api/superadmin/backup',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const backup = await exportPlatformBackup(
+          req.user!.uid,
+          req.user!.email || ''
+        );
+        const stamp = new Date().toISOString().slice(0, 10);
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader(
+          'Content-Disposition',
+          `attachment; filename="lokabio-backup-${stamp}.json"`
+        );
+        res.send(JSON.stringify(backup, null, 2));
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal mengunduh backup konfigurasi.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/superadmin/backup/restore',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const result = await restorePlatformBackup(
+          req.user!.uid,
+          req.user!.email || '',
+          req.body
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal memulihkan konfigurasi platform.';
+        res.status(400).json({ error: message });
       }
     }
   );

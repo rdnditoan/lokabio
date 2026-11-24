@@ -3,6 +3,7 @@ import { AnimatePresence, motion, Reorder } from 'motion/react';
 import {
   AlertTriangle,
   ArrowDown,
+  ArrowLeft,
   ArrowUp,
   BadgeCheck,
   BarChart3,
@@ -36,6 +37,7 @@ import {
   ShieldAlert,
   SlidersHorizontal,
   Smartphone,
+  Ticket,
   Trash2,
   Upload,
   User as UserIcon,
@@ -51,6 +53,7 @@ import { LinkIcon, SocialIcon } from '../components/IconMapper';
 import { QrCodeCard } from '../components/QrCodeCard';
 import {
   AnalyticsSummaryDTO,
+  CuratedThemeTemplateDTO,
   GRADIENT_SWATCHES,
   InquiryDTO,
   isUserProActive,
@@ -239,6 +242,31 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
   const [verifyNote, setVerifyNote] = useState('');
   const [verifySubmitting, setVerifySubmitting] = useState(false);
 
+  // Support Preview (Impersonate Read-Only) + Curated Themes + Promo Coupon
+  const [previewUserId] = useState<number | null>(() => {
+    const raw = new URLSearchParams(window.location.search).get(
+      'previewUserId'
+    );
+    const num = Number(raw);
+    return Number.isFinite(num) && num > 0 ? num : null;
+  });
+  const isSupportPreview = previewUserId !== null;
+  const [curatedThemes, setCuratedThemes] = useState<CuratedThemeTemplateDTO[]>(
+    () =>
+      THEME_PRESETS.map((p, idx) => ({
+        id: idx + 1,
+        slug: p.id,
+        name: p.name,
+        description: p.description,
+        ...p.config,
+        isActive: true,
+        isProOnly: false,
+        sortOrder: idx + 1,
+      }))
+  );
+  const [couponCodeInput, setCouponCodeInput] = useState('');
+  const [redeemingCoupon, setRedeemingCoupon] = useState(false);
+
   // Add link form
   const [newLinkType, setNewLinkType] = useState<string>('standard');
   const [newTitle, setNewTitle] = useState('');
@@ -331,7 +359,9 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
       params.set('displayName', pendingOnboarding.displayName);
     }
     const qs = params.toString();
-    const workspaceUrl = qs
+    const workspaceUrl = isSupportPreview
+      ? `/api/superadmin/users/${previewUserId}/workspace-preview`
+      : qs
       ? `/api/admin/workspace?${qs}`
       : '/api/admin/workspace';
 
@@ -357,6 +387,9 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
         setInquiriesList(Array.isArray(data.inquiries) ? data.inquiries : []);
         setPlatformNotice(data.platformNotice || null);
         setVerificationReq(data.verificationRequest || null);
+        if (Array.isArray(data.themeTemplates) && data.themeTemplates.length > 0) {
+          setCuratedThemes(data.themeTemplates);
+        }
         if (pendingOnboarding) {
           setPendingOnboarding(null);
         }
@@ -375,10 +408,10 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
     return () => {
       mounted = false;
     };
-  }, [user]);
+  }, [user, previewUserId]);
 
   useEffect(() => {
-    if (!user || activeTab !== 'analytics') return;
+    if (!user || activeTab !== 'analytics' || isSupportPreview) return;
     let active = true;
     setAnalyticsLoading(true);
 
@@ -395,7 +428,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
     return () => {
       active = false;
     };
-  }, [user, activeTab, analyticsDays]);
+  }, [user, activeTab, analyticsDays, isSupportPreview]);
 
   const livePreviewProfile = useMemo<PublicProfileDTO | null>(() => {
     if (!profile) return null;
@@ -429,8 +462,18 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
 
   // --- Link CRUD Handlers ---
 
+  const guardPreviewMutation = (): boolean => {
+    if (!isSupportPreview) return false;
+    showToast(
+      'err',
+      'Mode Pratinjau Dukungan (Read-Only): Perubahan data hanya dapat dilakukan melalui Panel Super Admin.'
+    );
+    return true;
+  };
+
   const handleCreateLink = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (guardPreviewMutation()) return;
     if (!newTitle.trim()) {
       showToast('err', 'Judul wajib diisi.');
       return;
@@ -494,6 +537,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
   };
 
   const handleToggleLinkActive = async (link: PublicLinkDTO) => {
+    if (guardPreviewMutation()) return;
     const nextActive = !link.isActive;
     setLinks((prev) =>
       prev.map((l) => (l.id === link.id ? { ...l, isActive: nextActive } : l))
@@ -552,6 +596,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
   };
 
   const handleSaveEditLink = async (linkId: number) => {
+    if (guardPreviewMutation()) return;
     if (!editTitle.trim()) {
       showToast('err', 'Judul tidak boleh kosong.');
       return;
@@ -593,6 +638,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
   };
 
   const handleDuplicateLink = async (linkId: number) => {
+    if (guardPreviewMutation()) return;
     try {
       const res = await authFetch(`/api/admin/links/${linkId}/duplicate`, {
         method: 'POST',
@@ -610,6 +656,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
   };
 
   const handleDeleteLink = async (linkId: number) => {
+    if (guardPreviewMutation()) return;
     try {
       const res = await authFetch(`/api/admin/links/${linkId}`, {
         method: 'DELETE',
@@ -624,6 +671,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
   };
 
   const persistReorder = async (nextLinks: PublicLinkDTO[]) => {
+    if (guardPreviewMutation()) return;
     setLinks(nextLinks);
     try {
       const res = await authFetch('/api/admin/links/reorder', {
@@ -639,6 +687,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
   };
 
   const moveLinkStep = (index: number, direction: -1 | 1) => {
+    if (guardPreviewMutation()) return;
     const target = index + direction;
     if (target < 0 || target >= links.length) return;
     const copy = [...links];
@@ -653,6 +702,7 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
     partial: Partial<PublicProfileDTO>,
     successMsg: string
   ) => {
+    if (guardPreviewMutation()) return;
     setSaving(true);
     try {
       const res = await authFetch('/api/admin/profile', {
@@ -681,15 +731,78 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
     }
   };
 
-  const handleApplyPreset = (presetId: string) => {
-    const preset = THEME_PRESETS.find((p) => p.id === presetId);
+  const handleApplyPreset = (presetSlug: string) => {
+    if (guardPreviewMutation()) return;
+    const preset = curatedThemes.find((p) => p.slug === presetSlug);
     if (!preset || !profile) return;
+    if (preset.isProOnly && !isUserProActive(profile)) {
+      showToast(
+        'err',
+        `Tema "${preset.name}" khusus pengguna Pro. Tukarkan kupon promo di tab SEO & QR!`
+      );
+      return;
+    }
     const nextFields = {
-      themePreset: preset.id,
-      ...preset.config,
+      themePreset: preset.slug,
+      bgType: preset.bgType,
+      bgColor: preset.bgColor,
+      bgGradient: preset.bgGradient,
+      buttonColor: preset.buttonColor,
+      buttonTextColor: preset.buttonTextColor,
+      buttonShape: preset.buttonShape,
+      textColor: preset.textColor,
+      fontFamily: preset.fontFamily,
     };
     setProfile({ ...profile, ...nextFields });
     saveProfileFields(nextFields, `Tema "${preset.name}" diterapkan.`);
+  };
+
+  const handleRedeemCoupon = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (guardPreviewMutation()) return;
+    const clean = couponCodeInput.trim().toUpperCase();
+    if (!clean) {
+      showToast('err', 'Masukkan kode kupon promo terlebih dahulu.');
+      return;
+    }
+    setRedeemingCoupon(true);
+    try {
+      const res = await authFetch('/api/admin/coupons/redeem', {
+        method: 'POST',
+        body: JSON.stringify({ code: clean }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal menukarkan kode kupon.');
+      }
+      if (data.user) {
+        setProfile((prev) =>
+          prev
+            ? {
+                ...prev,
+                planTier: data.user.planTier,
+                planExpiresAt: data.user.planExpiresAt,
+              }
+            : null
+        );
+      }
+      setCouponCodeInput('');
+      showToast(
+        'ok',
+        data.expiresAt
+          ? `Selamat! Paket Pro aktif hingga ${new Date(
+              data.expiresAt
+            ).toLocaleDateString('id-ID')}.`
+          : 'Selamat! Paket Pro selamanya berhasil diaktifkan.'
+      );
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal menukarkan kode kupon.'
+      );
+    } finally {
+      setRedeemingCoupon(false);
+    }
   };
 
   const handleUsernameCheck = async (val: string) => {
@@ -1089,6 +1202,32 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Support Preview Banner */}
+      {isSupportPreview && (
+        <div className="bg-[#141413] text-white px-4 sm:px-6 py-2.5 border-b border-stone-800">
+          <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2">
+              <Shield className="w-4 h-4 text-[#D97757] shrink-0" />
+              <span>
+                <strong>Mode Pratinjau Dukungan (Read-Only):</strong> Anda sedang memeriksa Studio milik{' '}
+                <span className="font-mono text-amber-300">
+                  @{profile.username}
+                </span>{' '}
+                ({profile.displayName}). Perubahan langsung dinonaktifkan di layar ini.
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => onNavigate('/admin')}
+              className="px-3 py-1 rounded-lg bg-white text-[#141413] font-semibold hover:bg-stone-100 inline-flex items-center gap-1.5 shrink-0"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Kembali ke Panel Admin</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main 2-Column Studio Workspace */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 pt-6 lg:pt-8">
@@ -2139,23 +2278,30 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
                   transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
                   className="space-y-6"
                 >
-                  {/* Preset Grid */}
+                  {/* Preset Grid (Curated Global Themes) */}
                   <div className="bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
-                    <h2 className="font-display text-base font-semibold">
-                      Preset Tema Bawaan
-                    </h2>
+                    <div className="flex items-center justify-between gap-2">
+                      <h2 className="font-display text-base font-semibold">
+                        Preset Tema Resmi Platform
+                      </h2>
+                      <span className="text-[11px] text-stone-500">
+                        {curatedThemes.length} tema tersedia
+                      </span>
+                    </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                      {THEME_PRESETS.map((preset) => {
-                        const active = profile.themePreset === preset.id;
+                      {curatedThemes.map((preset) => {
+                        const active = profile.themePreset === preset.slug;
+                        const lockedForFree =
+                          preset.isProOnly && !isUserProActive(profile);
                         const previewBg =
-                          preset.config.bgType === 'gradient'
-                            ? { backgroundImage: preset.config.bgGradient }
-                            : { backgroundColor: preset.config.bgColor };
+                          preset.bgType === 'gradient' && preset.bgGradient
+                            ? { backgroundImage: preset.bgGradient }
+                            : { backgroundColor: preset.bgColor };
                         return (
                           <button
-                            key={preset.id}
+                            key={preset.slug}
                             type="button"
-                            onClick={() => handleApplyPreset(preset.id)}
+                            onClick={() => handleApplyPreset(preset.slug)}
                             className={`text-left p-4 rounded-2xl border transition-all flex items-start gap-3.5 ${
                               active
                                 ? 'border-[#141413] ring-1 ring-[#141413] bg-stone-50'
@@ -2169,20 +2315,33 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
                               <div
                                 className="w-7 h-2 rounded-full"
                                 style={{
-                                  backgroundColor: preset.config.buttonColor,
+                                  backgroundColor: preset.buttonColor,
                                 }}
                               />
                               <div
                                 className="w-7 h-2 rounded-full"
                                 style={{
-                                  backgroundColor: preset.config.buttonColor,
+                                  backgroundColor: preset.buttonColor,
                                 }}
                               />
                             </div>
-                            <div className="min-w-0">
-                              <p className="text-sm font-semibold text-[#141413]">
-                                {preset.name}
-                              </p>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-1.5">
+                                <p className="text-sm font-semibold text-[#141413] truncate">
+                                  {preset.name}
+                                </p>
+                                {preset.isProOnly && (
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                                      lockedForFree
+                                        ? 'bg-amber-100 text-amber-800'
+                                        : 'bg-emerald-100 text-emerald-800'
+                                    }`}
+                                  >
+                                    PRO
+                                  </span>
+                                )}
+                              </div>
                               <p className="text-xs text-stone-500 mt-1 leading-relaxed">
                                 {preset.description}
                               </p>
@@ -4086,6 +4245,77 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
                   transition={{ duration: 0.16, ease: [0.16, 1, 0.3, 1] }}
                   className="space-y-6"
                 >
+                  {/* Paket Pro & Tukar Kupon Promo Card */}
+                  <div className="bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5">
+                        <div
+                          className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                            isUserProActive(profile)
+                              ? 'bg-amber-100 text-amber-700'
+                              : 'bg-stone-100 text-stone-600'
+                          }`}
+                        >
+                          <Crown className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h2 className="font-display text-base font-semibold">
+                            Status Paket:{' '}
+                            {isUserProActive(profile)
+                              ? 'LokaBio PRO Aktif'
+                              : 'Paket Free'}
+                          </h2>
+                          <p className="text-xs text-stone-500">
+                            {isUserProActive(profile)
+                              ? profile.planExpiresAt
+                                ? `Berlaku hingga ${new Date(
+                                    profile.planExpiresAt
+                                  ).toLocaleDateString('id-ID', {
+                                    day: 'numeric',
+                                    month: 'long',
+                                    year: 'numeric',
+                                  })}`
+                                : 'Aktif selamanya — tautan tak terbatas, tema Pro & sembunyikan branding.'
+                              : `Maksimal ${
+                                  platformNotice?.freeLinkLimit ?? 8
+                                } blok tautan. Punya kode kupon promo? Tukarkan di bawah ini.`}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <form
+                      onSubmit={handleRedeemCoupon}
+                      className="flex flex-col sm:flex-row gap-2.5 pt-2 border-t border-stone-100"
+                    >
+                      <div className="relative flex-1">
+                        <Ticket className="w-4 h-4 text-stone-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={couponCodeInput}
+                          onChange={(e) =>
+                            setCouponCodeInput(
+                              e.target.value
+                                .toUpperCase()
+                                .replace(/[^A-Z0-9_-]/g, '')
+                            )
+                          }
+                          placeholder="Masukkan kode kupon promo (misal: LOKABIO30)"
+                          className="w-full min-h-[40px] pl-9 pr-3 rounded-xl border border-stone-200 text-xs font-mono uppercase focus:outline-none focus:border-[#141413]"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={redeemingCoupon || !couponCodeInput.trim()}
+                        className="min-h-[40px] px-4 py-2 rounded-xl bg-[#141413] text-white text-xs font-semibold hover:bg-stone-800 disabled:opacity-45 whitespace-nowrap"
+                      >
+                        {redeemingCoupon
+                          ? 'Memproses...'
+                          : 'Tukarkan Kupon Pro'}
+                      </button>
+                    </form>
+                  </div>
+
                   {/* QR Code Generator Card */}
                   <div className="bg-white border border-stone-200 rounded-2xl p-5 sm:p-6">
                     <div className="flex flex-col sm:flex-row items-center gap-6">
