@@ -1,10 +1,10 @@
-import express, { Request, Response } from 'express';
+import express, { type Request, type Response } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';
-import { AuthRequest, requireAuth, requireSuperAdmin } from './src/middleware/auth.ts';
+import { type AuthRequest, requireAuth, requireSuperAdmin } from './src/middleware/auth.ts';
 import {
   createUserLink,
   deleteUserInquiry,

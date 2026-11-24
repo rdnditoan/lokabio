@@ -184,40 +184,43 @@ export function LandingPage({ onNavigate }: LandingPageProps) {
   return (
     <div className="min-h-screen bg-[#F6F5F1] text-[#141413] overflow-x-hidden">
       {/* Strict 3-Zone Top Bar */}
-      <header className="sticky top-0 z-30 bg-[#F6F5F1]/90 backdrop-blur-md border-b border-stone-200/80">
-        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-8">
+      <header className="sticky top-0 z-30 bg-[#F6F5F1]/85 backdrop-blur-xl border-b border-stone-200/75 transition-colors">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 h-[68px] flex items-center justify-between gap-8">
           {/* Zone 1: Single text wordmark */}
           <button
             type="button"
             onClick={() => onNavigate('/')}
-            className="font-display text-xl font-bold tracking-tight text-[#141413] bg-[#debe4f] whitespace-nowrap shrink-0"
+            className="font-display text-xl font-bold tracking-tight text-[#141413] hover:text-[#D97757] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             LokaBio
           </button>
 
           {/* Zone 2: Concise single-line text nav links */}
-          <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-stone-600">
+          <nav
+            aria-label="Navigasi utama"
+            className="hidden md:flex items-center gap-8 text-sm font-medium text-stone-600"
+          >
             <a
               href="#eksplorasi"
-              className="hover:text-[#141413] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
+              className="relative py-1 hover:text-[#141413] transition-colors whitespace-nowrap shrink-0 after:content-[''] after:absolute after:left-0 after:bottom-0 after:h-[1.5px] after:w-0 after:bg-[#D97757] after:transition-all after:duration-200 hover:after:w-full"
             >
               Eksplorasi
             </a>
             <a
               href="#fitur"
-              className="hover:text-[#141413] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
+              className="relative py-1 hover:text-[#141413] transition-colors whitespace-nowrap shrink-0 after:content-[''] after:absolute after:left-0 after:bottom-0 after:h-[1.5px] after:w-0 after:bg-[#D97757] after:transition-all after:duration-200 hover:after:w-full"
             >
               Fitur
             </a>
             <a
               href="#tema"
-              className="hover:text-[#141413] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
+              className="relative py-1 hover:text-[#141413] transition-colors whitespace-nowrap shrink-0 after:content-[''] after:absolute after:left-0 after:bottom-0 after:h-[1.5px] after:w-0 after:bg-[#D97757] after:transition-all after:duration-200 hover:after:w-full"
             >
               Tema
             </a>
             <a
               href="#seo"
-              className="hover:text-[#141413] hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
+              className="relative py-1 hover:text-[#141413] transition-colors whitespace-nowrap shrink-0 after:content-[''] after:absolute after:left-0 after:bottom-0 after:h-[1.5px] after:w-0 after:bg-[#D97757] after:transition-all after:duration-200 hover:after:w-full"
             >
               SEO
             </a>
@@ -228,7 +231,7 @@ export function LandingPage({ onNavigate }: LandingPageProps) {
             <button
               type="button"
               onClick={handlePrimaryAuth}
-              className="min-h-[40px] px-4 py-2 rounded-xl bg-[#141413] text-[#FAF9F6] text-xs sm:text-sm font-medium hover:bg-stone-800 active:scale-[0.98] transition-all whitespace-nowrap shrink-0"
+              className="min-h-[40px] px-4 py-2 rounded-xl bg-[#141413] text-[#FAF9F6] text-xs sm:text-sm font-semibold shadow-xs hover:bg-[#D97757] hover:shadow-sm active:scale-[0.98] transition-all whitespace-nowrap shrink-0 cursor-pointer"
             >
               {user ? 'Buka Studio' : 'Masuk | Daftar'}
             </button>
