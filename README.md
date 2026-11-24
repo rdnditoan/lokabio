@@ -32,18 +32,19 @@ Platform **BioLink** modern full-stack untuk kreator, profesional, dan UMKM. Dil
 
 ### 2. Studio Kreator (`/dashboard`)
 * **Editor & Live Preview Ponsel:** Perubahan tema, warna, gradien, gambar latar (*blur* & *overlay*), bentuk tombol, font, dan urutan tautan (*drag/reorder*) langsung terlihat pada `PhoneMockupFrame`.
+* **Paket Free vs Pro & Kuota Tautan:** Menampilkan lencana paket aktif (`FREE` / `PRO`), indikator kuota blok tautan paket Free sesuai batas yang diatur Super Admin, serta opsi Pro untuk menyembunyikan branding footer (`hideBranding`).
 * **Preset Tema Siap Pakai** + kustomisasi mendalam.
 * **Analitik Kreator:** Ringkasan *profile views*, total klik, CTR, distribusi perangkat (`Mobile`/`Desktop`), sumber *referrer*, dan performa per tautan.
 * **Manajemen Audiens:** Daftar *subscribers* newsletter, kotak masuk *inquiries* (tandai sudah dibaca / hapus), generator **QR Code**, dan pengajuan **Lencana Terverifikasi** (`verification_requests`).
-* **Pengumuman Global:** Menampilkan banner pengumuman aktif dari Super Admin.
+* **Pengumuman Global & Peringatan Khusus:** Menampilkan banner pengumuman global serta notifikasi/peringatan khusus dari Super Admin (`adminWarning`) yang dapat ditutup kreator.
 
 ### 3. Panel Super Admin (`/admin`)
-* **Overview & Direktori Pengguna:** Statistik platform global, pencarian pengguna, promosi/demosi role (`user`/`admin`), toggle verifikasi, suspend akun, dan toggle etalase.
-* **Inspeksi Pengguna & Moderasi Tautan:** Melihat detail tautan pengguna tertentu, menonaktifkan/menghapus satu tautan spesifik tanpa menghapus akun, dan *force rename* username bermasalah.
-* **Kurasi Etalase Landing Page:** Mengatur urutan tampil profil unggulan (`featuredOrder`).
-* **Antrean Verifikasi & Laporan:** Menyetujui/menolak pengajuan centang verifikasi serta meninjau laporan penyalahgunaan (termasuk opsi langsung suspend akun).
-* **Analitik Global & Ekspor CSV:** Grafik tren kunjungan/klik harian, metrik pertumbuhan, dan unduh laporan CSV.
-* **Audit Log & Pengaturan Platform:** Catatan riwayat seluruh aksi admin (`admin_audit_logs`), manajemen banner pengumuman global, dan daftar *reserved usernames* kustom.
+* **Overview, Aksi Massal, Sorting & Pagination:** Statistik platform global (termasuk total pengguna Pro dan akun *dormant*), pencarian pengguna, filter paket `Pro`, pengurutan (`Terbaru`, `Views`, `Klik`, `Tautan`, `Terlama Tidak Aktif`), pagination, serta aksi massal (*verify*, *suspend*, *featured*, *set_pro*, *set_free*, hapus).
+* **Manajemen Paket & Peringatan per Akun:** Mengatur paket `Free` / `Pro` lengkap dengan tanggal kedaluwarsa (`planExpiresAt`), mengirim atau menghapus peringatan khusus (`adminWarning`) ke Studio pengguna tertentu, dan *force rename* username.
+* **Keamanan Tautan Otomatis (*SafeLink Domain Blocklist*):** Mengelola daftar domain/pola URL terlarang (`blockedDomains`) yang otomatis memblokir penyimpanan tautan berbahaya sekaligus menandai tautan mencurigakan (`flaggedReason`) di modal inspeksi.
+* **Kontrol Operasional Darurat & Kuota:** Mengaktifkan *Maintenance Mode* (menampilkan layar pemeliharaan khusus di halaman publik & beranda sambil tetap memberi akses ke `/admin`), membuka/menutup pendaftaran akun baru (`registrationOpen`), serta mengatur kuota maksimal tautan paket Free (`freeLinkLimit`).
+* **Kurasi Etalase Landing Page & Antrean:** Mengatur urutan tampil profil unggulan (`featuredOrder`), meninjau pengajuan verifikasi centang biru, dan menangani laporan penyalahgunaan.
+* **Analitik Global, Akun *Dormant*, Pemeliharaan DB & Audit Log Terfilter:** Grafik tren kunjungan/klik harian, ekspor CSV, daftar kreator tidak aktif (> 30 hari), pemangkasan log `click_events` lama (> 30/90/180 hari), dan filter Audit Log berdasarkan tipe aksi atau kata kunci.
 
 ---
 
@@ -155,7 +156,7 @@ Platform **BioLink** modern full-stack untuk kreator, profesional, dan UMKM. Dil
 
 Didefinisikan di `src/db/schema.ts`:
 
-1. **`users`** — Data akun, role (`user`/`admin`), status (`isVerified`, `isSuspended`, `isFeatured`, `featuredOrder`), kustomisasi tema lengkap, kontak cepat (WhatsApp, email, vCard), QRIS, newsletter, form inquiry, dan pengaturan SEO/UTM.
+1. **`users`** — Data akun, role (`user`/`admin`), paket (`planTier`, `planExpiresAt`, `hideBranding`), status (`isVerified`, `isSuspended`, `isFeatured`, `featuredOrder`, `lastActiveAt`), peringatan admin (`adminWarning`, `adminWarningAt`), kustomisasi tema lengkap, kontak cepat (WhatsApp, email, vCard), QRIS, newsletter, form inquiry, dan pengaturan SEO/UTM.
 2. **`links`** — Daftar blok tautan milik pengguna (`standard`, `header`, `featured`, `embed`, `product`, `gallery`), galeri gambar (`jsonb`), kode PIN, jadwal (`publishAt`, `expireAt`), urutan posisi, dan jumlah klik.
 3. **`click_events`** — Log event kunjungan profil (`view`) dan klik tautan (`click`) beserta *referrer* dan tipe perangkat (`Mobile`/`Desktop`).
 4. **`subscribers`** — Daftar pelanggan newsletter per kreator.
@@ -163,7 +164,7 @@ Didefinisikan di `src/db/schema.ts`:
 6. **`admin_audit_logs`** — Jejak audit seluruh tindakan Super Admin (aksi, target username, detail, timestamp).
 7. **`profile_reports`** — Laporan penyalahgunaan profil dari pengunjung (`pending`, `resolved`, `dismissed`).
 8. **`verification_requests`** — Antrean pengajuan lencana terverifikasi dari kreator (`pending`, `approved`, `rejected`).
-9. **`platform_settings`** — Pengaturan global platform (`key = 'global'`), banner pengumuman global, dan daftar *reserved usernames* kustom.
+9. **`platform_settings`** — Pengaturan global platform (`key = 'global'`), banner pengumuman global, *reserved usernames*, kontrol *maintenance mode* (`maintenanceMode`, `maintenanceMessage`), status pendaftaran (`registrationOpen`), kuota Free (`freeLinkLimit`), dan daftar *SafeLink blocklist* (`blockedDomains`).
 
 ---
 
@@ -171,7 +172,8 @@ Didefinisikan di `src/db/schema.ts`:
 
 ### Public Routes
 * `GET /api/public/featured` — Mengambil daftar profil etalase yang aktif & terkurasi.
-* `GET /api/public/profiles/:username` — Mengambil profil publik & tautan aktif berdasarkan username.
+* `GET /api/public/platform-status` — Mengecek status *maintenance mode*, status pendaftaran akun baru, dan batas kuota tautan paket Free.
+* `GET /api/public/profiles/:username` — Mengambil profil publik & tautan aktif berdasarkan username (mengembalikan `503` saat *maintenance mode* aktif).
 * `POST /api/public/profiles/:username/view` — Mencatat kunjungan profil.
 * `POST /api/public/links/:id/click` — Mencatat klik tautan.
 * `POST /api/public/links/:id/unlock` — Membuka tautan terkunci PIN.
@@ -182,25 +184,28 @@ Didefinisikan di `src/db/schema.ts`:
 * `GET /sitemap.xml` & `GET /robots.txt` — Peta situs dinamis seluruh profil aktif.
 
 ### Authenticated Studio Routes (`Authorization: Bearer <token>`)
-* `GET /api/admin/workspace` — Memuat data profil, tautan, subscribers, inquiries, pengajuan verifikasi, dan pengumuman global.
-* `PUT /api/admin/profile` — Memperbarui profil, tema, QRIS, SEO, dan kontak cepat.
+* `GET /api/admin/workspace` — Memuat data profil, tautan, subscribers, inquiries, pengajuan verifikasi, dan notifikasi platform.
+* `POST /api/admin/warning/dismiss` — Menutup banner peringatan khusus Super Admin di Studio kreator.
+* `PUT /api/admin/profile` — Memperbarui profil, tema, QRIS, SEO (termasuk `hideBranding` untuk Pro), dan kontak cepat.
 * `GET /api/admin/analytics` — Mengambil data analitik kreator.
 * `GET /api/admin/username-check` — Cek ketersediaan username saat ingin mengganti handle.
-* `POST /api/admin/links`, `PUT /api/admin/links/:id`, `DELETE /api/admin/links/:id`, `PATCH /api/admin/links/reorder`, `POST /api/admin/links/:id/duplicate` — CRUD & duplikasi/urutan tautan.
-* `POST /api/admin/verification-requests` — Mengajukan verifikasi akun.
+* `POST /api/admin/links`, `PUT /api/admin/links/:id`, `DELETE /api/admin/links/:id`, `PATCH /api/admin/links/reorder`, `POST /api/admin/links/:id/duplicate` — CRUD, duplikasi, penegakan kuota Free & SafeLink blocklist, serta urutan tautan.
+* `POST /api/admin/verification-request` — Mengajukan verifikasi akun.
 * `DELETE /api/admin/subscribers/:id`, `PATCH /api/admin/inquiries/:id`, `DELETE /api/admin/inquiries/:id` — Mengelola audiens & pesan masuk.
 
 ### Super Admin Routes (`Authorization: Bearer <token>` + `role === 'admin'`)
-* `GET /api/superadmin/overview` — Statistik platform, daftar pengguna, dan pengaturan global.
-* `GET /api/superadmin/analytics` — Analitik pertumbuhan & trafik global platform.
-* `GET /api/superadmin/users/:id/detail` — Inspeksi detail pengguna dan semua tautannya.
-* `PATCH /api/superadmin/users/:id`, `DELETE /api/superadmin/users/:id` — Ubah role, verifikasi, suspend, featured, *force rename* username, atau hapus akun.
+* `GET /api/superadmin/overview` — Statistik platform (termasuk Pro & *dormant*), daftar pengguna, dan pengaturan global.
+* `GET /api/superadmin/analytics` — Analitik pertumbuhan, kreator teraktif, daftar kreator *dormant*, dan total baris `click_events`.
+* `GET /api/superadmin/users/:id/detail` — Inspeksi detail pengguna dan semua tautannya (termasuk deteksi pelanggaran *SafeLink*).
+* `POST /api/superadmin/users/bulk` — Aksi massal terhadap banyak pengguna sekaligus (`verify`, `unverify`, `suspend`, `unsuspend`, `feature`, `unfeature`, `set_pro`, `set_free`, `delete`).
+* `PATCH /api/superadmin/users/:id`, `DELETE /api/superadmin/users/:id` — Ubah role, paket (`planTier` & `planExpiresAt`), kirim/hapus `adminWarning`, verifikasi, suspend, featured, *force rename* username, atau hapus akun.
 * `PATCH /api/superadmin/links/:linkId`, `DELETE /api/superadmin/links/:linkId` — Moderasi atau hapus satu tautan pengguna.
 * `PATCH /api/superadmin/featured-order` — Simpan urutan etalase landing page.
 * `GET /api/superadmin/reports`, `PATCH /api/superadmin/reports/:id` — Tinjau & tindak lanjuti laporan profil.
 * `GET /api/superadmin/verifications`, `PATCH /api/superadmin/verifications/:id` — Setujui atau tolak pengajuan verifikasi.
-* `GET /api/superadmin/audit-logs` — Melihat log aktivitas Super Admin.
-* `PUT /api/superadmin/settings` — Memperbarui pengumuman global dan *reserved usernames*.
+* `GET /api/superadmin/audit-logs` — Melihat & memfilter log aktivitas Super Admin (`?action=...&q=...`).
+* `POST /api/superadmin/maintenance/cleanup-events` — Memangkas log `click_events` lama berdasarkan rentang hari.
+* `PUT /api/superadmin/settings` — Memperbarui pengumuman global, *reserved usernames*, *maintenance mode*, izin pendaftaran, kuota Free, dan `blockedDomains`.
 
 ---
 

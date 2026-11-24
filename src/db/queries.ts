@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, lt, ne, sql } from 'drizzle-orm';
 import { db } from './index.ts';
 import {
   adminAuditLogs,
@@ -19,13 +19,17 @@ import {
   type AdminUserDetailDTO,
   type AdminUserSummaryDTO,
   type AnalyticsSummaryDTO,
+  type BulkUserAction,
+  findBlockedDomainMatch,
   isLinkScheduledActive,
+  isUserProActive,
   normalizeUrl,
   type PlatformAnalyticsDTO,
   type PlatformSettingsDTO,
   type PlatformStatsDTO,
   type ProfileReportDTO,
   type PublicLinkDTO,
+  type PublicPlatformStatusDTO,
   sanitizeUsername,
   type VerificationRequestDTO,
 } from '../shared/themes.ts';
@@ -124,15 +128,25 @@ export async function getOrCreateUser(
       .limit(1);
 
     if (existing[0]) {
+      const nextPatch: Record<string, unknown> = { lastActiveAt: new Date() };
       if (isBootstrapAdminEmail(email) && existing[0].role !== 'admin') {
-        const promoted = await db
-          .update(users)
-          .set({ role: 'admin', updatedAt: new Date() })
-          .where(eq(users.id, existing[0].id))
-          .returning();
-        if (promoted[0]) return promoted[0];
+        nextPatch.role = 'admin';
+        nextPatch.planTier = 'pro';
+        nextPatch.updatedAt = new Date();
       }
-      return existing[0];
+      const touched = await db
+        .update(users)
+        .set(nextPatch)
+        .where(eq(users.id, existing[0].id))
+        .returning();
+      return touched[0] ?? existing[0];
+    }
+
+    const settings = await getOrCreatePlatformSettings();
+    if (!settings.registrationOpen && !isBootstrapAdminEmail(email)) {
+      throw new Error(
+        'Pendaftaran akun baru saat ini sedang ditutup oleh administrator.'
+      );
     }
 
     let candidate = '';
@@ -258,6 +272,12 @@ export async function getOrCreateUser(
 
     return userRow;
   } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes('Pendaftaran akun baru')
+    ) {
+      throw error;
+    }
     console.error('Database query failed (getOrCreateUser):', error);
     throw new Error('Gagal menyiapkan akun pengguna.', { cause: error });
   }
@@ -285,6 +305,7 @@ export async function getPublicProfileByUsername(username: string) {
 
     return {
       ...user,
+      hideBranding: isUserProActive(user) ? user.hideBranding : false,
       links: userLinks,
     };
   } catch (error) {
@@ -410,6 +431,21 @@ export async function getOrCreatePlatformSettings(): Promise<PlatformSettingsDTO
         reservedUsernames: Array.isArray(existing[0].reservedUsernames)
           ? existing[0].reservedUsernames
           : [],
+        maintenanceMode: Boolean(existing[0].maintenanceMode),
+        maintenanceMessage:
+          existing[0].maintenanceMessage ||
+          'Platform sedang dalam pemeliharaan terjadwal. Silakan kembali beberapa saat lagi.',
+        registrationOpen:
+          existing[0].registrationOpen !== undefined
+            ? Boolean(existing[0].registrationOpen)
+            : true,
+        freeLinkLimit:
+          Number(existing[0].freeLinkLimit) > 0
+            ? Number(existing[0].freeLinkLimit)
+            : 8,
+        blockedDomains: Array.isArray(existing[0].blockedDomains)
+          ? existing[0].blockedDomains
+          : [],
         updatedBy: existing[0].updatedBy,
         updatedAt: existing[0].updatedAt,
       };
@@ -435,6 +471,12 @@ export async function getOrCreatePlatformSettings(): Promise<PlatformSettingsDTO
           'gopay',
           'lokabio',
         ],
+        maintenanceMode: false,
+        maintenanceMessage:
+          'Platform sedang dalam pemeliharaan terjadwal. Silakan kembali beberapa saat lagi.',
+        registrationOpen: true,
+        freeLinkLimit: 8,
+        blockedDomains: ['slotgacor', 'judionline', 'togelonline'],
         updatedBy: 'system',
       })
       .onConflictDoNothing({ target: platformSettings.key })
@@ -458,6 +500,16 @@ export async function getOrCreatePlatformSettings(): Promise<PlatformSettingsDTO
       reservedUsernames: Array.isArray(row?.reservedUsernames)
         ? row.reservedUsernames
         : [],
+      maintenanceMode: Boolean(row?.maintenanceMode),
+      maintenanceMessage:
+        row?.maintenanceMessage ||
+        'Platform sedang dalam pemeliharaan terjadwal. Silakan kembali beberapa saat lagi.',
+      registrationOpen:
+        row?.registrationOpen !== undefined ? Boolean(row.registrationOpen) : true,
+      freeLinkLimit: Number(row?.freeLinkLimit) > 0 ? Number(row?.freeLinkLimit) : 8,
+      blockedDomains: Array.isArray(row?.blockedDomains)
+        ? row.blockedDomains
+        : [],
       updatedBy: row?.updatedBy ?? '',
       updatedAt: row?.updatedAt,
     };
@@ -469,8 +521,24 @@ export async function getOrCreatePlatformSettings(): Promise<PlatformSettingsDTO
       announcementMessage: '',
       announcementType: 'info',
       reservedUsernames: [],
+      maintenanceMode: false,
+      maintenanceMessage:
+        'Platform sedang dalam pemeliharaan terjadwal. Silakan kembali beberapa saat lagi.',
+      registrationOpen: true,
+      freeLinkLimit: 8,
+      blockedDomains: [],
     };
   }
+}
+
+export async function getPublicPlatformStatus(): Promise<PublicPlatformStatusDTO> {
+  const settings = await getOrCreatePlatformSettings();
+  return {
+    maintenanceMode: settings.maintenanceMode,
+    maintenanceMessage: settings.maintenanceMessage,
+    registrationOpen: settings.registrationOpen,
+    freeLinkLimit: settings.freeLinkLimit,
+  };
 }
 
 export async function isUsernameAvailable(
@@ -554,6 +622,7 @@ export interface UpdateProfileInput {
   seoTitle?: string;
   seoDescription?: string;
   utmEnabled?: boolean;
+  hideBranding?: boolean;
 }
 
 export async function updateUserProfile(
@@ -569,8 +638,11 @@ export async function updateUserProfile(
       throw new Error('Akun Anda sedang dinonaktifkan sementara oleh administrator.');
     }
 
+    const settings = await getOrCreatePlatformSettings();
+
     const updateData: Record<string, unknown> = {
       updatedAt: new Date(),
+      lastActiveAt: new Date(),
     };
 
     if (input.username !== undefined) {
@@ -652,12 +724,21 @@ export async function updateUserProfile(
         input.socialPosition === 'bottom' ? 'bottom' : 'top';
     }
     if (input.socialLinks !== undefined) {
-      updateData.socialLinks = input.socialLinks
+      const sanitizedSocials = input.socialLinks
         .filter((s) => s && s.platform && s.url.trim())
         .map((s) => ({
           platform: s.platform,
           url: normalizeUrl(s.url),
         }));
+      for (const s of sanitizedSocials) {
+        const matched = findBlockedDomainMatch(s.url, settings.blockedDomains);
+        if (matched) {
+          throw new Error(
+            `Tautan media sosial ditolak oleh filter keamanan (terdeteksi: "${matched}").`
+          );
+        }
+      }
+      updateData.socialLinks = sanitizedSocials;
     }
     if (input.announcementEnabled !== undefined) {
       updateData.announcementEnabled = Boolean(input.announcementEnabled);
@@ -666,9 +747,21 @@ export async function updateUserProfile(
       updateData.announcementText = input.announcementText.trim().slice(0, 140);
     }
     if (input.announcementUrl !== undefined) {
-      updateData.announcementUrl = input.announcementUrl.trim()
+      const normalizedAnnUrl = input.announcementUrl.trim()
         ? normalizeUrl(input.announcementUrl)
         : '';
+      if (normalizedAnnUrl) {
+        const matched = findBlockedDomainMatch(
+          normalizedAnnUrl,
+          settings.blockedDomains
+        );
+        if (matched) {
+          throw new Error(
+            `URL pengumuman ditolak oleh filter keamanan (terdeteksi: "${matched}").`
+          );
+        }
+      }
+      updateData.announcementUrl = normalizedAnnUrl;
     }
     if (input.whatsappNumber !== undefined) {
       updateData.whatsappNumber = input.whatsappNumber
@@ -731,6 +824,14 @@ export async function updateUserProfile(
     if (input.utmEnabled !== undefined) {
       updateData.utmEnabled = Boolean(input.utmEnabled);
     }
+    if (input.hideBranding !== undefined) {
+      if (input.hideBranding && !isUserProActive(currentUser)) {
+        throw new Error(
+          'Fitur sembunyikan branding LokaBio hanya tersedia untuk akun Pro.'
+        );
+      }
+      updateData.hideBranding = Boolean(input.hideBranding);
+    }
 
     const updated = await db
       .update(users)
@@ -747,12 +848,26 @@ export async function updateUserProfile(
     if (
       error instanceof Error &&
       (error.message.includes('Username') ||
-        error.message.includes('tidak ditemukan'))
+        error.message.includes('tidak ditemukan') ||
+        error.message.includes('filter keamanan') ||
+        error.message.includes('akun Pro'))
     ) {
       throw error;
     }
     console.error('Database query failed (updateUserProfile):', error);
     throw new Error('Gagal menyimpan perubahan profil.', { cause: error });
+  }
+}
+
+export async function dismissUserAdminWarning(uid: string): Promise<void> {
+  try {
+    await db
+      .update(users)
+      .set({ adminWarning: '', adminWarningAt: null, lastActiveAt: new Date() })
+      .where(eq(users.uid, uid));
+  } catch (error) {
+    console.error('Database query failed (dismissUserAdminWarning):', error);
+    throw new Error('Gagal menutup peringatan admin.', { cause: error });
   }
 }
 
@@ -822,12 +937,23 @@ export async function createUserLink(
     const user = await getUserByUid(uid);
     if (!user) throw new Error('Pengguna tidak ditemukan.');
 
+    const settings = await getOrCreatePlatformSettings();
+
     const currentLinks = await db
-      .select({ position: links.position })
+      .select({ id: links.id, position: links.position })
       .from(links)
       .where(eq(links.userId, user.id))
-      .orderBy(desc(links.position))
-      .limit(1);
+      .orderBy(desc(links.position));
+
+    if (
+      !isUserProActive(user) &&
+      settings.freeLinkLimit > 0 &&
+      currentLinks.length >= settings.freeLinkLimit
+    ) {
+      throw new Error(
+        `Batas maksimal akun Free (${settings.freeLinkLimit} tautan) telah tercapai. Hapus tautan lama atau upgrade ke Pro.`
+      );
+    }
 
     const nextPosition =
       currentLinks[0] !== undefined ? currentLinks[0].position + 1 : 0;
@@ -855,6 +981,20 @@ export async function createUserLink(
       : [];
 
     const noUrlRequired = linkType === 'header' || linkType === 'gallery';
+    const finalUrl = noUrlRequired
+      ? input.url?.trim()
+        ? normalizeUrl(input.url)
+        : ''
+      : normalizeUrl(input.url || '');
+
+    if (finalUrl) {
+      const matched = findBlockedDomainMatch(finalUrl, settings.blockedDomains);
+      if (matched) {
+        throw new Error(
+          `URL ditolak oleh filter keamanan platform (terdeteksi domain/kata terlarang: "${matched}").`
+        );
+      }
+    }
 
     const inserted = await db
       .insert(links)
@@ -863,11 +1003,7 @@ export async function createUserLink(
         linkType,
         title: input.title.trim().slice(0, 120),
         subtitle: (input.subtitle || '').trim().slice(0, 180),
-        url: noUrlRequired
-          ? input.url?.trim()
-            ? normalizeUrl(input.url)
-            : ''
-          : normalizeUrl(input.url || ''),
+        url: finalUrl,
         icon: input.icon?.trim() || 'link',
         thumbnailUrl: input.thumbnailUrl?.trim() || '',
         priceText: (input.priceText || '').trim().slice(0, 40),
@@ -883,8 +1019,20 @@ export async function createUserLink(
       })
       .returning();
 
+    await db
+      .update(users)
+      .set({ lastActiveAt: new Date() })
+      .where(eq(users.id, user.id));
+
     return inserted[0];
   } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('Batas maksimal') ||
+        error.message.includes('filter keamanan'))
+    ) {
+      throw error;
+    }
     console.error('Database query failed (createUserLink):', error);
     throw new Error('Gagal menambahkan tautan baru.', { cause: error });
   }
@@ -914,6 +1062,8 @@ export async function updateUserLink(
     const user = await getUserByUid(uid);
     if (!user) throw new Error('Pengguna tidak ditemukan.');
 
+    const settings = await getOrCreatePlatformSettings();
+
     const allowedTypes = [
       'standard',
       'header',
@@ -935,7 +1085,16 @@ export async function updateUserLink(
       updateData.subtitle = input.subtitle.trim().slice(0, 180);
     }
     if (input.url !== undefined) {
-      updateData.url = input.url.trim() ? normalizeUrl(input.url) : '';
+      const normalized = input.url.trim() ? normalizeUrl(input.url) : '';
+      if (normalized) {
+        const matched = findBlockedDomainMatch(normalized, settings.blockedDomains);
+        if (matched) {
+          throw new Error(
+            `URL ditolak oleh filter keamanan platform (terdeteksi domain/kata terlarang: "${matched}").`
+          );
+        }
+      }
+      updateData.url = normalized;
     }
     if (input.icon !== undefined) {
       updateData.icon = input.icon.trim() || 'link';
@@ -985,8 +1144,20 @@ export async function updateUserLink(
       throw new Error('Tautan tidak ditemukan.');
     }
 
+    await db
+      .update(users)
+      .set({ lastActiveAt: new Date() })
+      .where(eq(users.id, user.id));
+
     return updated[0];
   } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('filter keamanan') ||
+        error.message.includes('tidak ditemukan'))
+    ) {
+      throw error;
+    }
     console.error('Database query failed (updateUserLink):', error);
     throw new Error('Gagal memperbarui tautan.', { cause: error });
   }
@@ -997,6 +1168,24 @@ export async function duplicateUserLink(uid: string, linkId: number) {
     const user = await getUserByUid(uid);
     if (!user) throw new Error('Pengguna tidak ditemukan.');
 
+    const settings = await getOrCreatePlatformSettings();
+
+    const allUserLinks = await db
+      .select({ id: links.id, position: links.position })
+      .from(links)
+      .where(eq(links.userId, user.id))
+      .orderBy(desc(links.position));
+
+    if (
+      !isUserProActive(user) &&
+      settings.freeLinkLimit > 0 &&
+      allUserLinks.length >= settings.freeLinkLimit
+    ) {
+      throw new Error(
+        `Batas maksimal akun Free (${settings.freeLinkLimit} tautan) telah tercapai. Hapus tautan lama atau upgrade ke Pro.`
+      );
+    }
+
     const existing = await db
       .select()
       .from(links)
@@ -1006,15 +1195,8 @@ export async function duplicateUserLink(uid: string, linkId: number) {
     const src = existing[0];
     if (!src) throw new Error('Tautan tidak ditemukan.');
 
-    const maxPosRows = await db
-      .select({ position: links.position })
-      .from(links)
-      .where(eq(links.userId, user.id))
-      .orderBy(desc(links.position))
-      .limit(1);
-
     const nextPosition =
-      maxPosRows[0] !== undefined ? maxPosRows[0].position + 1 : 0;
+      allUserLinks[0] !== undefined ? allUserLinks[0].position + 1 : 0;
 
     const inserted = await db
       .insert(links)
@@ -1041,6 +1223,9 @@ export async function duplicateUserLink(uid: string, linkId: number) {
 
     return inserted[0];
   } catch (error) {
+    if (error instanceof Error && error.message.includes('Batas maksimal')) {
+      throw error;
+    }
     console.error('Database query failed (duplicateUserLink):', error);
     throw new Error('Gagal menggandakan tautan.', { cause: error });
   }
@@ -1612,11 +1797,17 @@ export async function getPlatformAdminOverview(search?: string): Promise<{
       inqByUser.set(row.userId, (inqByUser.get(row.userId) || 0) + 1);
     }
 
+    const thirtyDaysAgoMs = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
     const stats: PlatformStatsDTO = {
       totalUsers: allUsers.length,
       totalAdmins: allUsers.filter((u) => u.role === 'admin').length,
+      totalProUsers: allUsers.filter((u) => isUserProActive(u)).length,
       totalVerified: allUsers.filter((u) => u.isVerified).length,
       totalSuspended: allUsers.filter((u) => u.isSuspended).length,
+      dormantUsers: allUsers.filter(
+        (u) => new Date(u.lastActiveAt).getTime() < thirtyDaysAgoMs
+      ).length,
       totalLinks: allLinks.length,
       totalViews: allUsers.reduce((acc, u) => acc + (u.profileViews || 0), 0),
       totalClicks: allLinks.reduce((acc, l) => acc + (l.clicks || 0), 0),
@@ -1646,6 +1837,12 @@ export async function getPlatformAdminOverview(search?: string): Promise<{
           displayName: u.displayName,
           avatarUrl: u.avatarUrl,
           role: u.role,
+          planTier: isUserProActive(u) ? 'pro' : 'free',
+          planExpiresAt: u.planExpiresAt,
+          hideBranding: Boolean(u.hideBranding),
+          adminWarning: u.adminWarning || '',
+          adminWarningAt: u.adminWarningAt,
+          lastActiveAt: u.lastActiveAt || u.updatedAt || u.createdAt,
           isVerified: u.isVerified,
           isSuspended: u.isSuspended,
           isFeatured: u.isFeatured,
@@ -1675,11 +1872,12 @@ export async function getPlatformGlobalAnalytics(
     sinceDate.setHours(0, 0, 0, 0);
     sinceDate.setDate(sinceDate.getDate() - (safeDays - 1));
 
-    const [events, allUsers, allLinks] = await Promise.all([
+    const [events, totalEventsRow, allUsers, allLinks] = await Promise.all([
       db
         .select()
         .from(clickEvents)
         .where(gte(clickEvents.createdAt, sinceDate)),
+      db.select({ count: sql<number>`count(*)::int` }).from(clickEvents),
       db.select().from(users),
       db.select({ userId: links.userId, clicks: links.clicks }).from(links),
     ]);
@@ -1707,12 +1905,12 @@ export async function getPlatformGlobalAnalytics(
       clicks: val.clicks,
     }));
 
-    const clicksByUser = new Map<number, number>();
+    const linkStatsByUser = new Map<number, { count: number; clicks: number }>();
     for (const row of allLinks) {
-      clicksByUser.set(
-        row.userId,
-        (clicksByUser.get(row.userId) || 0) + (row.clicks || 0)
-      );
+      const prev = linkStatsByUser.get(row.userId) || { count: 0, clicks: 0 };
+      prev.count += 1;
+      prev.clicks += row.clicks || 0;
+      linkStatsByUser.set(row.userId, prev);
     }
 
     const topCreators = allUsers
@@ -1722,7 +1920,7 @@ export async function getPlatformGlobalAnalytics(
         username: u.username,
         displayName: u.displayName,
         profileViews: u.profileViews || 0,
-        totalClicks: clicksByUser.get(u.id) || 0,
+        totalClicks: linkStatsByUser.get(u.id)?.clicks || 0,
         isVerified: u.isVerified,
       }))
       .sort(
@@ -1731,7 +1929,30 @@ export async function getPlatformGlobalAnalytics(
       )
       .slice(0, 6);
 
-    return { days: safeDays, dailySeries, topCreators };
+    const dormantCreators = allUsers
+      .filter((u) => u.role !== 'admin')
+      .map((u) => ({
+        id: u.id,
+        username: u.username,
+        displayName: u.displayName,
+        email: u.email,
+        lastActiveAt: u.lastActiveAt || u.updatedAt || u.createdAt,
+        profileViews: u.profileViews || 0,
+        linkCount: linkStatsByUser.get(u.id)?.count || 0,
+      }))
+      .sort(
+        (a, b) =>
+          new Date(a.lastActiveAt).getTime() - new Date(b.lastActiveAt).getTime()
+      )
+      .slice(0, 10);
+
+    return {
+      days: safeDays,
+      dailySeries,
+      topCreators,
+      dormantCreators,
+      totalClickEvents: totalEventsRow[0]?.count ?? 0,
+    };
   } catch (error) {
     console.error('Database query failed (getPlatformGlobalAnalytics):', error);
     throw new Error('Gagal memuat analitik platform.', { cause: error });
@@ -1751,7 +1972,7 @@ export async function getAdminUserDetail(
     const u = userRows[0];
     if (!u) throw new Error('Pengguna tidak ditemukan.');
 
-    const [userLinks, userSubs, userInq] = await Promise.all([
+    const [userLinks, userSubs, userInq, settings] = await Promise.all([
       db
         .select()
         .from(links)
@@ -1759,6 +1980,7 @@ export async function getAdminUserDetail(
         .orderBy(asc(links.position), asc(links.id)),
       db.select({ id: subscribers.id }).from(subscribers).where(eq(subscribers.userId, u.id)),
       db.select({ id: inquiries.id }).from(inquiries).where(eq(inquiries.userId, u.id)),
+      getOrCreatePlatformSettings(),
     ]);
 
     return {
@@ -1770,6 +1992,12 @@ export async function getAdminUserDetail(
         displayName: u.displayName,
         avatarUrl: u.avatarUrl,
         role: u.role,
+        planTier: isUserProActive(u) ? 'pro' : 'free',
+        planExpiresAt: u.planExpiresAt,
+        hideBranding: Boolean(u.hideBranding),
+        adminWarning: u.adminWarning || '',
+        adminWarningAt: u.adminWarningAt,
+        lastActiveAt: u.lastActiveAt || u.updatedAt || u.createdAt,
         isVerified: u.isVerified,
         isSuspended: u.isSuspended,
         isFeatured: u.isFeatured,
@@ -1784,17 +2012,23 @@ export async function getAdminUserDetail(
         whatsappNumber: u.whatsappNumber,
         contactEmail: u.contactEmail,
       },
-      links: userLinks.map((l) => ({
-        id: l.id,
-        linkType: l.linkType,
-        title: l.title,
-        subtitle: l.subtitle,
-        url: l.url,
-        isActive: l.isActive,
-        clicks: l.clicks,
-        position: l.position,
-        priceText: l.priceText,
-      })),
+      links: userLinks.map((l) => {
+        const matched = l.url
+          ? findBlockedDomainMatch(l.url, settings.blockedDomains)
+          : null;
+        return {
+          id: l.id,
+          linkType: l.linkType,
+          title: l.title,
+          subtitle: l.subtitle,
+          url: l.url,
+          isActive: l.isActive,
+          clicks: l.clicks,
+          position: l.position,
+          priceText: l.priceText,
+          flaggedReason: matched || undefined,
+        };
+      }),
     };
   } catch (error) {
     if (error instanceof Error && error.message.includes('tidak ditemukan')) {
@@ -1816,6 +2050,9 @@ export async function superAdminUpdateUser(
     isFeatured?: boolean;
     featuredOrder?: number;
     newUsername?: string;
+    planTier?: string;
+    planExpiresAt?: string | null;
+    adminWarning?: string;
   }
 ): Promise<UserRecord> {
   try {
@@ -1847,6 +2084,34 @@ export async function superAdminUpdateUser(
       const nextRole = patch.role === 'admin' ? 'admin' : 'user';
       updateData.role = nextRole;
       changes.push(`Peran → ${nextRole === 'admin' ? 'Super Admin' : 'User'}`);
+    }
+    if (patch.planTier !== undefined) {
+      const nextPlan = patch.planTier === 'pro' ? 'pro' : 'free';
+      updateData.planTier = nextPlan;
+      if (nextPlan === 'free') {
+        updateData.planExpiresAt = null;
+        updateData.hideBranding = false;
+      }
+      changes.push(`Paket → ${nextPlan.toUpperCase()}`);
+    }
+    if (patch.planExpiresAt !== undefined) {
+      const parsedExp = parseOptionalDate(patch.planExpiresAt);
+      updateData.planExpiresAt = parsedExp ?? null;
+      changes.push(
+        parsedExp
+          ? `Masa Pro s/d ${new Date(parsedExp).toISOString().slice(0, 10)}`
+          : 'Masa Pro selamanya'
+      );
+    }
+    if (patch.adminWarning !== undefined) {
+      const cleanWarning = patch.adminWarning.trim().slice(0, 320);
+      updateData.adminWarning = cleanWarning;
+      updateData.adminWarningAt = cleanWarning ? new Date() : null;
+      changes.push(
+        cleanWarning
+          ? `Kirim peringatan: "${cleanWarning.slice(0, 60)}"`
+          : 'Hapus peringatan akun'
+      );
     }
     if (patch.isVerified !== undefined) {
       updateData.isVerified = Boolean(patch.isVerified);
@@ -1919,6 +2184,124 @@ export async function superAdminUpdateUser(
     }
     console.error('Database query failed (superAdminUpdateUser):', error);
     throw new Error('Gagal memperbarui pengguna.', { cause: error });
+  }
+}
+
+export async function superAdminBulkUsersAction(
+  userIds: number[],
+  action: BulkUserAction,
+  actingAdminUid: string,
+  actingAdminEmail: string
+): Promise<{ affectedCount: number; skippedSelf: boolean }> {
+  try {
+    const cleanIds = Array.from(
+      new Set(userIds.map((n) => Number(n)).filter((n) => Number.isFinite(n) && n > 0))
+    ).slice(0, 100);
+
+    if (cleanIds.length === 0) {
+      throw new Error('Pilih minimal satu pengguna.');
+    }
+
+    const targets = await db
+      .select()
+      .from(users)
+      .where(inArray(users.id, cleanIds));
+
+    let skippedSelf = false;
+    const eligibleIds: number[] = [];
+    for (const u of targets) {
+      const isSelf = u.uid === actingAdminUid;
+      if (isSelf && (action === 'suspend' || action === 'delete')) {
+        skippedSelf = true;
+        continue;
+      }
+      eligibleIds.push(u.id);
+    }
+
+    if (eligibleIds.length === 0) {
+      return { affectedCount: 0, skippedSelf };
+    }
+
+    const now = new Date();
+    switch (action) {
+      case 'verify':
+        await db
+          .update(users)
+          .set({ isVerified: true, updatedAt: now })
+          .where(inArray(users.id, eligibleIds));
+        break;
+      case 'unverify':
+        await db
+          .update(users)
+          .set({ isVerified: false, updatedAt: now })
+          .where(inArray(users.id, eligibleIds));
+        break;
+      case 'suspend':
+        await db
+          .update(users)
+          .set({ isSuspended: true, updatedAt: now })
+          .where(inArray(users.id, eligibleIds));
+        break;
+      case 'unsuspend':
+        await db
+          .update(users)
+          .set({ isSuspended: false, updatedAt: now })
+          .where(inArray(users.id, eligibleIds));
+        break;
+      case 'feature':
+        await db
+          .update(users)
+          .set({ isFeatured: true, updatedAt: now })
+          .where(inArray(users.id, eligibleIds));
+        break;
+      case 'unfeature':
+        await db
+          .update(users)
+          .set({ isFeatured: false, featuredOrder: 0, updatedAt: now })
+          .where(inArray(users.id, eligibleIds));
+        break;
+      case 'set_pro':
+        await db
+          .update(users)
+          .set({ planTier: 'pro', updatedAt: now })
+          .where(inArray(users.id, eligibleIds));
+        break;
+      case 'set_free':
+        await db
+          .update(users)
+          .set({
+            planTier: 'free',
+            planExpiresAt: null,
+            hideBranding: false,
+            updatedAt: now,
+          })
+          .where(inArray(users.id, eligibleIds));
+        break;
+      case 'delete':
+        await db.delete(users).where(inArray(users.id, eligibleIds));
+        break;
+      default:
+        throw new Error('Aksi massal tidak dikenali.');
+    }
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'BULK_USER_ACTION',
+      details: `Aksi massal "${action}" pada ${eligibleIds.length} pengguna`,
+    });
+
+    return { affectedCount: eligibleIds.length, skippedSelf };
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.includes('Pilih minimal') ||
+        error.message.includes('tidak dikenali'))
+    ) {
+      throw error;
+    }
+    console.error('Database query failed (superAdminBulkUsersAction):', error);
+    throw new Error('Gagal menjalankan aksi massal.', { cause: error });
   }
 }
 
@@ -2233,16 +2616,69 @@ export async function superAdminReviewVerification(
   }
 }
 
-export async function getAdminAuditLogs(limit = 80): Promise<AdminAuditLogDTO[]> {
+export async function getAdminAuditLogs(options?: {
+  limit?: number;
+  action?: string;
+  search?: string;
+}): Promise<AdminAuditLogDTO[]> {
   try {
-    return await db
-      .select()
-      .from(adminAuditLogs)
-      .orderBy(desc(adminAuditLogs.createdAt))
-      .limit(limit);
+    const limit = Math.max(10, Math.min(200, Number(options?.limit) || 120));
+    const actionFilter = (options?.action || '').trim();
+    const q = (options?.search || '').trim().toLowerCase();
+
+    const rows = actionFilter
+      ? await db
+          .select()
+          .from(adminAuditLogs)
+          .where(eq(adminAuditLogs.action, actionFilter))
+          .orderBy(desc(adminAuditLogs.createdAt))
+          .limit(limit)
+      : await db
+          .select()
+          .from(adminAuditLogs)
+          .orderBy(desc(adminAuditLogs.createdAt))
+          .limit(limit);
+
+    if (!q) return rows;
+    return rows.filter(
+      (r) =>
+        r.adminEmail.toLowerCase().includes(q) ||
+        r.targetUsername.toLowerCase().includes(q) ||
+        r.details.toLowerCase().includes(q) ||
+        r.action.toLowerCase().includes(q)
+    );
   } catch (error) {
     console.error('Database query failed (getAdminAuditLogs):', error);
     throw new Error('Gagal memuat log aktivitas admin.', { cause: error });
+  }
+}
+
+export async function superAdminCleanupClickEvents(
+  olderThanDays: number,
+  actingAdminUid: string,
+  actingAdminEmail: string
+): Promise<{ deletedCount: number }> {
+  try {
+    const safeDays = Math.max(7, Math.min(365, Number(olderThanDays) || 90));
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - safeDays);
+
+    const deleted = await db
+      .delete(clickEvents)
+      .where(lt(clickEvents.createdAt, cutoff))
+      .returning({ id: clickEvents.id });
+
+    await recordAdminAuditLog({
+      actingAdminUid,
+      actingAdminEmail,
+      action: 'CLEANUP_CLICK_EVENTS',
+      details: `Membersihkan ${deleted.length} log klik/kunjungan lebih lama dari ${safeDays} hari`,
+    });
+
+    return { deletedCount: deleted.length };
+  } catch (error) {
+    console.error('Database query failed (superAdminCleanupClickEvents):', error);
+    throw new Error('Gagal membersihkan log event lama.', { cause: error });
   }
 }
 
@@ -2255,6 +2691,11 @@ export async function superAdminUpdatePlatformSettings(
     announcementMessage?: string;
     announcementType?: string;
     reservedUsernames?: string[];
+    maintenanceMode?: boolean;
+    maintenanceMessage?: string;
+    registrationOpen?: boolean;
+    freeLinkLimit?: number;
+    blockedDomains?: string[];
   }
 ): Promise<PlatformSettingsDTO> {
   try {
@@ -2286,6 +2727,32 @@ export async function superAdminUpdatePlatformSettings(
           )
         ).slice(0, 100)
       : current.reservedUsernames;
+    const nextMaintenanceMode =
+      patch.maintenanceMode !== undefined
+        ? Boolean(patch.maintenanceMode)
+        : current.maintenanceMode;
+    const nextMaintenanceMessage =
+      patch.maintenanceMessage !== undefined
+        ? patch.maintenanceMessage.trim().slice(0, 320) ||
+          'Platform sedang dalam pemeliharaan terjadwal. Silakan kembali beberapa saat lagi.'
+        : current.maintenanceMessage;
+    const nextRegistrationOpen =
+      patch.registrationOpen !== undefined
+        ? Boolean(patch.registrationOpen)
+        : current.registrationOpen;
+    const nextFreeLinkLimit =
+      patch.freeLinkLimit !== undefined
+        ? Math.max(1, Math.min(100, Number(patch.freeLinkLimit) || 8))
+        : current.freeLinkLimit;
+    const nextBlockedDomains = Array.isArray(patch.blockedDomains)
+      ? Array.from(
+          new Set(
+            patch.blockedDomains
+              .map((d) => String(d).trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, ''))
+              .filter((d) => d.length >= 3 && d.length <= 120)
+          )
+        ).slice(0, 150)
+      : current.blockedDomains;
 
     const updated = await db
       .update(platformSettings)
@@ -2295,6 +2762,11 @@ export async function superAdminUpdatePlatformSettings(
         announcementMessage: nextMessage,
         announcementType: nextType,
         reservedUsernames: nextReserved,
+        maintenanceMode: nextMaintenanceMode,
+        maintenanceMessage: nextMaintenanceMessage,
+        registrationOpen: nextRegistrationOpen,
+        freeLinkLimit: nextFreeLinkLimit,
+        blockedDomains: nextBlockedDomains,
         updatedBy: actingAdminEmail,
         updatedAt: new Date(),
       })
@@ -2305,9 +2777,9 @@ export async function superAdminUpdatePlatformSettings(
       actingAdminUid,
       actingAdminEmail,
       action: 'UPDATE_PLATFORM_SETTINGS',
-      details: `Pengumuman global: ${nextEnabled ? 'Aktif' : 'Nonaktif'} · ${
-        nextReserved.length
-      } username terlarang`,
+      details: `Maintenance: ${nextMaintenanceMode ? 'ON' : 'OFF'} · Registrasi: ${
+        nextRegistrationOpen ? 'Buka' : 'Tutup'
+      } · Limit Free: ${nextFreeLinkLimit} · ${nextBlockedDomains.length} domain terblokir`,
     });
 
     const row = updated[0];
@@ -2318,6 +2790,13 @@ export async function superAdminUpdatePlatformSettings(
       announcementType: row.announcementType,
       reservedUsernames: Array.isArray(row.reservedUsernames)
         ? row.reservedUsernames
+        : [],
+      maintenanceMode: Boolean(row.maintenanceMode),
+      maintenanceMessage: row.maintenanceMessage,
+      registrationOpen: Boolean(row.registrationOpen),
+      freeLinkLimit: Number(row.freeLinkLimit) || 8,
+      blockedDomains: Array.isArray(row.blockedDomains)
+        ? row.blockedDomains
         : [],
       updatedBy: row.updatedBy,
       updatedAt: row.updatedAt,

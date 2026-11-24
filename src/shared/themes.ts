@@ -60,6 +60,17 @@ export interface PublicLinkDTO {
 }
 
 export type UserRole = 'user' | 'admin';
+export type PlanTier = 'free' | 'pro';
+export type BulkUserAction =
+  | 'verify'
+  | 'unverify'
+  | 'suspend'
+  | 'unsuspend'
+  | 'feature'
+  | 'unfeature'
+  | 'set_pro'
+  | 'set_free'
+  | 'delete';
 
 export interface PublicProfileDTO extends ThemeConfig {
   id: number;
@@ -69,6 +80,11 @@ export interface PublicProfileDTO extends ThemeConfig {
   avatarUrl: string;
   coverUrl?: string;
   role?: UserRole | string;
+  planTier?: PlanTier | string;
+  planExpiresAt?: string | Date | null;
+  hideBranding?: boolean;
+  adminWarning?: string;
+  adminWarningAt?: string | Date | null;
   isVerified: boolean;
   isSuspended?: boolean;
   isFeatured?: boolean;
@@ -130,6 +146,12 @@ export interface AdminUserSummaryDTO {
   displayName: string;
   avatarUrl: string;
   role: UserRole | string;
+  planTier: PlanTier | string;
+  planExpiresAt: string | Date | null;
+  hideBranding: boolean;
+  adminWarning: string;
+  adminWarningAt: string | Date | null;
+  lastActiveAt: string | Date;
   isVerified: boolean;
   isSuspended: boolean;
   isFeatured: boolean;
@@ -145,8 +167,10 @@ export interface AdminUserSummaryDTO {
 export interface PlatformStatsDTO {
   totalUsers: number;
   totalAdmins: number;
+  totalProUsers: number;
   totalVerified: number;
   totalSuspended: number;
+  dormantUsers: number;
   totalLinks: number;
   totalViews: number;
   totalClicks: number;
@@ -172,6 +196,7 @@ export interface AdminUserDetailDTO {
     clicks: number;
     position: number;
     priceText: string;
+    flaggedReason?: string;
   }>;
 }
 
@@ -221,8 +246,20 @@ export interface PlatformSettingsDTO {
   announcementMessage: string;
   announcementType: 'info' | 'warning' | 'success' | string;
   reservedUsernames: string[];
+  maintenanceMode: boolean;
+  maintenanceMessage: string;
+  registrationOpen: boolean;
+  freeLinkLimit: number;
+  blockedDomains: string[];
   updatedBy?: string;
   updatedAt?: string | Date;
+}
+
+export interface PublicPlatformStatusDTO {
+  maintenanceMode: boolean;
+  maintenanceMessage: string;
+  registrationOpen: boolean;
+  freeLinkLimit: number;
 }
 
 export interface PlatformAnalyticsDTO {
@@ -236,6 +273,16 @@ export interface PlatformAnalyticsDTO {
     totalClicks: number;
     isVerified: boolean;
   }>;
+  dormantCreators: Array<{
+    id: number;
+    username: string;
+    displayName: string;
+    email: string;
+    lastActiveAt: string | Date;
+    profileViews: number;
+    linkCount: number;
+  }>;
+  totalClickEvents: number;
 }
 
 export interface ThemePresetDefinition {
@@ -521,6 +568,43 @@ export function parseMediaEmbed(rawUrl: string): {
     }
   } catch {
     return null;
+  }
+  return null;
+}
+
+export function isUserProActive(user: {
+  role?: string;
+  planTier?: string;
+  planExpiresAt?: string | Date | null;
+}): boolean {
+  if (user.role === 'admin') return true;
+  if (user.planTier !== 'pro') return false;
+  if (!user.planExpiresAt) return true;
+  const exp = new Date(user.planExpiresAt);
+  if (Number.isNaN(exp.getTime())) return true;
+  return exp.getTime() > Date.now();
+}
+
+export function findBlockedDomainMatch(
+  rawUrl: string,
+  blockedDomains: string[]
+): string | null {
+  const cleaned = (rawUrl || '').trim().toLowerCase();
+  if (!cleaned || !Array.isArray(blockedDomains) || blockedDomains.length === 0) {
+    return null;
+  }
+  let hostAndPath = cleaned;
+  try {
+    const parsed = new URL(normalizeUrl(cleaned));
+    hostAndPath = `${parsed.hostname.replace(/^www\./, '')}${parsed.pathname}${parsed.search}`.toLowerCase();
+  } catch {
+    hostAndPath = cleaned;
+  }
+  for (const rawRule of blockedDomains) {
+    const rule = String(rawRule || '').trim().toLowerCase();
+    if (rule.length >= 3 && (hostAndPath.includes(rule) || cleaned.includes(rule))) {
+      return rule;
+    }
   }
   return null;
 }

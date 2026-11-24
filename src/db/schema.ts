@@ -24,6 +24,12 @@ export const users = pgTable('users', {
   avatarUrl: text('avatar_url').notNull().default(''),
   coverUrl: text('cover_url').notNull().default(''),
   role: text('role').notNull().default('user'), // 'user' | 'admin'
+  planTier: text('plan_tier').notNull().default('free'), // 'free' | 'pro'
+  planExpiresAt: timestamp('plan_expires_at'),
+  hideBranding: boolean('hide_branding').notNull().default(false),
+  adminWarning: text('admin_warning').notNull().default(''),
+  adminWarningAt: timestamp('admin_warning_at'),
+  lastActiveAt: timestamp('last_active_at').defaultNow().notNull(),
   isVerified: boolean('is_verified').notNull().default(false),
   isSuspended: boolean('is_suspended').notNull().default(false),
   isFeatured: boolean('is_featured').notNull().default(false),
@@ -213,6 +219,18 @@ export const platformSettings = pgTable('platform_settings', {
   announcementMessage: text('announcement_message').notNull().default(''),
   announcementType: text('announcement_type').notNull().default('info'), // 'info' | 'warning' | 'success'
   reservedUsernames: jsonb('reserved_usernames')
+    .$type<string[]>()
+    .notNull()
+    .default([]),
+  maintenanceMode: boolean('maintenance_mode').notNull().default(false),
+  maintenanceMessage: text('maintenance_message')
+    .notNull()
+    .default(
+      'Platform sedang dalam pemeliharaan terjadwal. Silakan kembali beberapa saat lagi.'
+    ),
+  registrationOpen: boolean('registration_open').notNull().default(true),
+  freeLinkLimit: integer('free_link_limit').notNull().default(8),
+  blockedDomains: jsonb('blocked_domains')
     .$type<string[]>()
     .notNull()
     .default([]),

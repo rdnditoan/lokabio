@@ -14,6 +14,7 @@ import {
   User as UserIcon,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { PublicPlatformStatusDTO } from '../shared/themes';
 
 interface AuthPageProps {
   initialMode: 'login' | 'register';
@@ -61,6 +62,17 @@ export function AuthPage({ initialMode, onNavigate }: AuthPageProps) {
   const [usernameCheck, setUsernameCheck] = useState<UsernameAvailability | null>(
     null
   );
+  const [platformStatus, setPlatformStatus] =
+    useState<PublicPlatformStatusDTO | null>(null);
+
+  useEffect(() => {
+    fetch('/api/public/platform-status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setPlatformStatus(data);
+      })
+      .catch(() => {});
+  }, []);
 
   // Sync mode if route changes between /login and /register
   useEffect(() => {
@@ -379,6 +391,34 @@ export function AuthPage({ initialMode, onNavigate }: AuthPageProps) {
                 : 'Masuk untuk mengelola tautan, tema real-time, analitik pengunjung, dan QR Code.'}
             </p>
           </div>
+
+          {/* Platform Operational Notices */}
+          {platformStatus?.maintenanceMode && (
+            <div className="mb-5 p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 leading-relaxed">
+              <p className="font-semibold">Mode Pemeliharaan Aktif</p>
+              <p className="mt-0.5">{platformStatus.maintenanceMessage}</p>
+            </div>
+          )}
+
+          {mode === 'register' &&
+            platformStatus &&
+            !platformStatus.registrationOpen &&
+            !forgotMode && (
+              <div className="mb-5 p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-900 leading-relaxed">
+                <p className="font-semibold">Pendaftaran Akun Baru Ditutup</p>
+                <p className="mt-0.5">
+                  Administrator saat ini menutup pendaftaran akun baru. Jika Anda sudah memiliki akun, silakan masuk melalui tab{' '}
+                  <button
+                    type="button"
+                    onClick={() => switchMode('login')}
+                    className="font-semibold underline"
+                  >
+                    Masuk
+                  </button>
+                  .
+                </p>
+              </div>
+            )}
 
           {/* Alerts */}
           <AnimatePresence initial={false}>

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ShieldAlert } from 'lucide-react';
+import { ArrowLeft, ShieldAlert, Wrench } from 'lucide-react';
 import { BioLinkRenderer } from '../components/BioLinkRenderer';
 import { PublicProfileDTO } from '../shared/themes';
 
@@ -16,6 +16,7 @@ export function PublicProfilePage({
   const [loading, setLoading] = useState(true);
   const [notFound, setNotFound] = useState(false);
   const [suspendedMsg, setSuspendedMsg] = useState<string | null>(null);
+  const [maintenanceMsg, setMaintenanceMsg] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const trackedViewRef = useRef<string | null>(null);
 
@@ -24,10 +25,21 @@ export function PublicProfilePage({
     setLoading(true);
     setNotFound(false);
     setSuspendedMsg(null);
+    setMaintenanceMsg(null);
     setError(null);
 
     fetch(`/api/public/profiles/${encodeURIComponent(username)}`)
       .then(async (res) => {
+        if (res.status === 503) {
+          const errData = await res.json().catch(() => null);
+          if (active) {
+            setMaintenanceMsg(
+              errData?.error ||
+                'Platform sedang dalam pemeliharaan terjadwal. Silakan kembali beberapa saat lagi.'
+            );
+          }
+          return null;
+        }
         if (res.status === 404) {
           if (active) setNotFound(true);
           return null;
@@ -144,6 +156,31 @@ export function PublicProfilePage({
               Klaim @{username}
             </button>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (maintenanceMsg) {
+    return (
+      <div className="min-h-screen bg-[#F6F5F1] text-[#141413] flex flex-col items-center justify-center px-4 text-center">
+        <div className="max-w-md w-full bg-white border border-stone-200 rounded-2xl p-8">
+          <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4">
+            <Wrench className="w-6 h-6" />
+          </div>
+          <h1 className="font-display text-2xl font-bold tracking-tight mb-2">
+            Sedang Dalam Pemeliharaan
+          </h1>
+          <p className="text-sm text-stone-600 leading-relaxed mb-6">
+            {maintenanceMsg}
+          </p>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="min-h-[44px] px-5 py-2 rounded-xl bg-[#141413] text-white text-sm font-medium hover:bg-stone-800 transition-colors"
+          >
+            Coba Muat Ulang
+          </button>
         </div>
       </div>
     );

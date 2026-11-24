@@ -11,6 +11,7 @@ import {
   deleteUserLink,
   deleteUserSubscriber,
   detectDeviceType,
+  dismissUserAdminWarning,
   duplicateUserLink,
   getAdminAuditLogs,
   getAdminReports,
@@ -23,6 +24,7 @@ import {
   getOrCreateUser,
   getPlatformAdminOverview,
   getPlatformGlobalAnalytics,
+  getPublicPlatformStatus,
   getPublicProfileByUsername,
   getUserAnalyticsSummary,
   getUserLatestVerificationRequest,
@@ -35,6 +37,8 @@ import {
   submitProfileReport,
   submitVerificationRequest,
   subscribeToProfile,
+  superAdminBulkUsersAction,
+  superAdminCleanupClickEvents,
   superAdminDeleteLink,
   superAdminDeleteUser,
   superAdminModerateLink,
@@ -48,7 +52,7 @@ import {
   updateUserLink,
   updateUserProfile,
 } from './src/db/queries.ts';
-import { isLinkScheduledActive } from './src/shared/themes.ts';
+import { type BulkUserAction, isLinkScheduledActive } from './src/shared/themes.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -195,8 +199,28 @@ async function startServer() {
     }
   });
 
+  app.get('/api/public/platform-status', async (_req: Request, res: Response) => {
+    try {
+      const status = await getPublicPlatformStatus();
+      res.json(status);
+    } catch (error: unknown) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : 'Gagal memuat status platform.';
+      res.status(500).json({ error: message });
+    }
+  });
+
   app.get('/api/public/profiles/:username', async (req: Request, res: Response) => {
     try {
+      const status = await getPublicPlatformStatus();
+      if (status.maintenanceMode) {
+        return res.status(503).json({
+          maintenanceMode: true,
+          error: status.maintenanceMessage,
+        });
+      }
       const username = String(req.params.username || '');
       const profile = await getPublicProfileByUsername(username);
       if (!profile) {
@@ -385,15 +409,36 @@ async function startServer() {
           announcementTitle: settings.announcementTitle,
           announcementMessage: settings.announcementMessage,
           announcementType: settings.announcementType,
+          maintenanceMode: settings.maintenanceMode,
+          maintenanceMessage: settings.maintenanceMessage,
+          freeLinkLimit: settings.freeLinkLimit,
         },
         verificationRequest,
       });
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : 'Gagal memuat studio.';
-      res.status(500).json({ error: message });
+      const status = message.includes('Pendaftaran akun baru') ? 403 : 500;
+      res.status(status).json({ error: message });
     }
   });
+
+  app.post(
+    '/api/admin/warning/dismiss',
+    requireAuth,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        await dismissUserAdminWarning(req.user!.uid);
+        res.json({ ok: true });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal menutup peringatan admin.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
 
   app.post(
     '/api/admin/verification-request',
@@ -450,7 +495,10 @@ async function startServer() {
         error instanceof Error ? error.message : 'Gagal memperbarui profil.';
       const status = message.includes('dinonaktifkan')
         ? 403
-        : message.includes('Username') || message.includes('sudah digunakan')
+        : message.includes('Username') ||
+          message.includes('sudah digunakan') ||
+          message.includes('filter keamanan') ||
+          message.includes('akun Pro')
         ? 400
         : 500;
       res.status(status).json({ error: message });
@@ -506,7 +554,11 @@ async function startServer() {
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : 'Gagal menambah tautan.';
-      res.status(500).json({ error: message });
+      const status =
+        message.includes('Batas maksimal') || message.includes('filter keamanan')
+          ? 400
+          : 500;
+      res.status(status).json({ error: message });
     }
   });
 
@@ -524,7 +576,8 @@ async function startServer() {
       } catch (error: unknown) {
         const message =
           error instanceof Error ? error.message : 'Gagal menggandakan tautan.';
-        res.status(500).json({ error: message });
+        const status = message.includes('Batas maksimal') ? 400 : 500;
+        res.status(status).json({ error: message });
       }
     }
   );
@@ -540,7 +593,8 @@ async function startServer() {
     } catch (error: unknown) {
       const message =
         error instanceof Error ? error.message : 'Gagal memperbarui tautan.';
-      res.status(500).json({ error: message });
+      const status = message.includes('filter keamanan') ? 400 : 500;
+      res.status(status).json({ error: message });
     }
   });
 
@@ -701,6 +755,33 @@ async function startServer() {
     }
   );
 
+  app.post(
+    '/api/superadmin/users/bulk',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const userIds = Array.isArray(req.body?.userIds)
+          ? req.body.userIds.map((n: unknown) => Number(n))
+          : [];
+        const action = String(req.body?.action || '') as BulkUserAction;
+        const result = await superAdminBulkUsersAction(
+          userIds,
+          action,
+          req.user!.uid,
+          req.user!.email || ''
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal menjalankan aksi massal.';
+        res.status(400).json({ error: message });
+      }
+    }
+  );
+
   app.patch(
     '/api/superadmin/users/:id',
     requireAuth,
@@ -718,6 +799,9 @@ async function startServer() {
           isFeatured,
           featuredOrder,
           newUsername,
+          planTier,
+          planExpiresAt,
+          adminWarning,
         } = req.body || {};
         const updated = await superAdminUpdateUser(
           targetId,
@@ -730,6 +814,9 @@ async function startServer() {
             isFeatured,
             featuredOrder,
             newUsername,
+            planTier,
+            planExpiresAt,
+            adminWarning,
           }
         );
         res.json({ user: updated });
@@ -947,13 +1034,38 @@ async function startServer() {
     '/api/superadmin/audit-logs',
     requireAuth,
     requireSuperAdmin,
-    async (_req: AuthRequest, res: Response) => {
+    async (req: AuthRequest, res: Response) => {
       try {
-        const logs = await getAdminAuditLogs(100);
+        const action = typeof req.query.action === 'string' ? req.query.action : '';
+        const search = typeof req.query.q === 'string' ? req.query.q : '';
+        const logs = await getAdminAuditLogs({ limit: 150, action, search });
         res.json({ logs });
       } catch (error: unknown) {
         const message =
           error instanceof Error ? error.message : 'Gagal memuat audit log.';
+        res.status(500).json({ error: message });
+      }
+    }
+  );
+
+  app.post(
+    '/api/superadmin/maintenance/cleanup-events',
+    requireAuth,
+    requireSuperAdmin,
+    async (req: AuthRequest, res: Response) => {
+      try {
+        const olderThanDays = Number(req.body?.olderThanDays) || 90;
+        const result = await superAdminCleanupClickEvents(
+          olderThanDays,
+          req.user!.uid,
+          req.user!.email || ''
+        );
+        res.json(result);
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : 'Gagal membersihkan log event lama.';
         res.status(500).json({ error: message });
       }
     }

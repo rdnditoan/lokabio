@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Activity,
+  AlertTriangle,
   ArrowDown,
   ArrowLeft,
   ArrowUp,
@@ -9,6 +10,10 @@ import {
   Ban,
   BarChart3,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Crown,
+  Database,
   Download,
   ExternalLink,
   Eye,
@@ -16,6 +21,7 @@ import {
   Flag,
   LayoutDashboard,
   Link2,
+  Lock,
   LogOut,
   Megaphone,
   Plus,
@@ -23,10 +29,12 @@ import {
   Settings,
   Shield,
   ShieldAlert,
+  ShieldCheck,
   Star,
   Trash2,
   User as UserIcon,
   Users,
+  Wrench,
   X,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -35,11 +43,14 @@ import {
   AdminAuditLogDTO,
   AdminUserDetailDTO,
   AdminUserSummaryDTO,
+  BulkUserAction,
+  PlanTier,
   PlatformAnalyticsDTO,
   PlatformSettingsDTO,
   PlatformStatsDTO,
   ProfileReportDTO,
   VerificationRequestDTO,
+  isUserProActive,
 } from '../shared/themes';
 
 interface AdminPageProps {
@@ -53,7 +64,22 @@ type AdminSectionTab =
   | 'curation'
   | 'analytics';
 
-type UserFilter = 'all' | 'verified' | 'featured' | 'admin' | 'suspended';
+type UserFilter =
+  | 'all'
+  | 'pro'
+  | 'verified'
+  | 'featured'
+  | 'admin'
+  | 'suspended';
+
+type UserSort =
+  | 'newest'
+  | 'views'
+  | 'clicks'
+  | 'links'
+  | 'oldest_active';
+
+const USERS_PER_PAGE = 10;
 
 export function AdminPage({ onNavigate }: AdminPageProps) {
   const { user, loading: authLoading, signOut, authFetch } = useAuth();
@@ -71,6 +97,11 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
     announcementMessage: '',
     announcementType: 'info',
     reservedUsernames: [],
+    maintenanceMode: false,
+    maintenanceMessage: '',
+    registrationOpen: true,
+    freeLinkLimit: 8,
+    blockedDomains: [],
   });
 
   // Sub-tab data
@@ -82,13 +113,25 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
   const [verificationsLoading, setVerificationsLoading] = useState(false);
   const [auditLogs, setAuditLogs] = useState<AdminAuditLogDTO[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [logActionFilter, setLogActionFilter] = useState('ALL');
+  const [logSearchQuery, setLogSearchQuery] = useState('');
   const [analyticsDays, setAnalyticsDays] = useState<7 | 14 | 30>(14);
   const [analytics, setAnalytics] = useState<PlatformAnalyticsDTO | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [confirmCleanupDays, setConfirmCleanupDays] = useState<number | null>(
+    null
+  );
+  const [cleanupBusy, setCleanupBusy] = useState(false);
 
-  // User list filters
+  // User list filters, sort, pagination & bulk actions
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<UserFilter>('all');
+  const [userSort, setUserSort] = useState<UserSort>('newest');
+  const [currentPage, setCurrentPage] = useState(1);
+  const [selectedUserIds, setSelectedUserIds] = useState<number[]>([]);
+  const [bulkAction, setBulkAction] = useState<BulkUserAction | ''>('');
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [busyUserId, setBusyUserId] = useState<number | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<number | null>(null);
   const [brokenAvatars, setBrokenAvatars] = useState<Record<number, boolean>>({});
@@ -99,12 +142,16 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
   );
   const [inspectLoading, setInspectLoading] = useState(false);
   const [forceUsernameInput, setForceUsernameInput] = useState('');
+  const [planTierInput, setPlanTierInput] = useState<PlanTier>('free');
+  const [planExpiresAtInput, setPlanExpiresAtInput] = useState('');
+  const [warningInput, setWarningInput] = useState('');
   const [inspectSaving, setInspectSaving] = useState(false);
 
   // Featured ordering & Settings drafts
   const [featuredDraftIds, setFeaturedDraftIds] = useState<number[]>([]);
   const [savingOrder, setSavingOrder] = useState(false);
   const [newReservedWord, setNewReservedWord] = useState('');
+  const [newBlockedDomain, setNewBlockedDomain] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
 
   // Notes for reviewing reports / verifications
@@ -194,13 +241,44 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
     }
   };
 
+  const loadAuditLogs = async (
+    action = logActionFilter,
+    q = logSearchQuery
+  ) => {
+    setLogsLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (action && action !== 'ALL') params.set('action', action);
+      if (q.trim()) params.set('q', q.trim());
+      const queryStr = params.toString();
+      const logRes = await authFetch(
+        `/api/superadmin/audit-logs${queryStr ? `?${queryStr}` : ''}`
+      );
+      const logData = await logRes.json().catch(() => null);
+      if (logRes.ok && Array.isArray(logData?.logs)) {
+        setAuditLogs(logData.logs);
+      }
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
   const loadAnalyticsAndLogs = async (days = analyticsDays) => {
     setAnalyticsLoading(true);
     setLogsLoading(true);
     try {
+      const params = new URLSearchParams();
+      if (logActionFilter && logActionFilter !== 'ALL') {
+        params.set('action', logActionFilter);
+      }
+      if (logSearchQuery.trim()) params.set('q', logSearchQuery.trim());
+      const queryStr = params.toString();
+
       const [anRes, logRes] = await Promise.all([
         authFetch(`/api/superadmin/analytics?days=${days}`),
-        authFetch('/api/superadmin/audit-logs'),
+        authFetch(
+          `/api/superadmin/audit-logs${queryStr ? `?${queryStr}` : ''}`
+        ),
       ]);
       const anData = await anRes.json().catch(() => null);
       const logData = await logRes.json().catch(() => null);
@@ -240,9 +318,14 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       .finally(() => setAnalyticsLoading(false));
   }, [analyticsDays]);
 
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchQuery, filter, userSort]);
+
   const filteredUsers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    return usersList.filter((u) => {
+    const list = usersList.filter((u) => {
+      if (filter === 'pro' && !isUserProActive(u)) return false;
       if (filter === 'verified' && !u.isVerified) return false;
       if (filter === 'featured' && !u.isFeatured) return false;
       if (filter === 'admin' && u.role !== 'admin') return false;
@@ -254,7 +337,37 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
         u.email.toLowerCase().includes(q)
       );
     });
-  }, [usersList, searchQuery, filter]);
+
+    const sorted = [...list];
+    sorted.sort((a, b) => {
+      switch (userSort) {
+        case 'views':
+          return b.profileViews - a.profileViews;
+        case 'clicks':
+          return b.totalClicks - a.totalClicks;
+        case 'links':
+          return b.linkCount - a.linkCount;
+        case 'oldest_active':
+          return (
+            new Date(a.lastActiveAt || a.createdAt).getTime() -
+            new Date(b.lastActiveAt || b.createdAt).getTime()
+          );
+        case 'newest':
+        default:
+          return (
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          );
+      }
+    });
+    return sorted;
+  }, [usersList, searchQuery, filter, userSort]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredUsers.length / USERS_PER_PAGE));
+  const safePage = Math.min(currentPage, totalPages);
+  const paginatedUsers = useMemo(() => {
+    const start = (safePage - 1) * USERS_PER_PAGE;
+    return filteredUsers.slice(start, start + USERS_PER_PAGE);
+  }, [filteredUsers, safePage]);
 
   const featuredOrderedUsers = useMemo(() => {
     const map = new Map(usersList.map((u) => [u.id, u]));
@@ -350,6 +463,62 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
     }
   };
 
+  const handleToggleSelectUser = (id: number) => {
+    setConfirmBulkDelete(false);
+    setSelectedUserIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleToggleSelectPage = () => {
+    setConfirmBulkDelete(false);
+    const pageIds = paginatedUsers.map((u) => u.id);
+    const allSelected =
+      pageIds.length > 0 && pageIds.every((id) => selectedUserIds.includes(id));
+    if (allSelected) {
+      setSelectedUserIds((prev) => prev.filter((id) => !pageIds.includes(id)));
+    } else {
+      setSelectedUserIds((prev) => Array.from(new Set([...prev, ...pageIds])));
+    }
+  };
+
+  const handleBulkAction = async () => {
+    if (!bulkAction || selectedUserIds.length === 0) return;
+    if (bulkAction === 'delete' && !confirmBulkDelete) {
+      setConfirmBulkDelete(true);
+      return;
+    }
+    setBulkBusy(true);
+    try {
+      const res = await authFetch('/api/superadmin/users/bulk', {
+        method: 'POST',
+        body: JSON.stringify({
+          userIds: selectedUserIds,
+          action: bulkAction,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal menjalankan aksi massal.');
+      }
+      setSelectedUserIds([]);
+      setBulkAction('');
+      setConfirmBulkDelete(false);
+      await loadOverview();
+      showToast(
+        'ok',
+        `Aksi massal berhasil diterapkan ke ${data.affectedCount ?? 0} akun.`
+      );
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal menjalankan aksi massal.'
+      );
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const openInspectModal = async (targetId: number) => {
     setInspectLoading(true);
     setInspectDetail(null);
@@ -361,6 +530,13 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       }
       setInspectDetail(data);
       setForceUsernameInput(data.user.username);
+      setPlanTierInput(data.user.planTier === 'pro' ? 'pro' : 'free');
+      setPlanExpiresAtInput(
+        data.user.planExpiresAt
+          ? new Date(data.user.planExpiresAt).toISOString().slice(0, 10)
+          : ''
+      );
+      setWarningInput(data.user.adminWarning || '');
     } catch (err: unknown) {
       showToast(
         'err',
@@ -409,6 +585,161 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       );
     } finally {
       setInspectSaving(false);
+    }
+  };
+
+  const handleSaveInspectPlan = async () => {
+    if (!inspectDetail) return;
+    setInspectSaving(true);
+    try {
+      const expiresIso =
+        planTierInput === 'pro' && planExpiresAtInput
+          ? new Date(`${planExpiresAtInput}T23:59:59`).toISOString()
+          : null;
+      const res = await authFetch(
+        `/api/superadmin/users/${inspectDetail.user.id}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({
+            planTier: planTierInput,
+            planExpiresAt: expiresIso,
+          }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Gagal menyimpan paket.');
+
+      const nextUsers = usersList.map((u) =>
+        u.id === inspectDetail.user.id
+          ? {
+              ...u,
+              planTier: data.user.planTier,
+              planExpiresAt: data.user.planExpiresAt,
+            }
+          : u
+      );
+      setUsersList(nextUsers);
+      setInspectDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              user: {
+                ...prev.user,
+                planTier: data.user.planTier,
+                planExpiresAt: data.user.planExpiresAt,
+              },
+            }
+          : prev
+      );
+      setStats((prev) =>
+        prev
+          ? {
+              ...prev,
+              totalProUsers: nextUsers.filter((u) => isUserProActive(u)).length,
+            }
+          : prev
+      );
+      showToast(
+        'ok',
+        `Paket @${inspectDetail.user.username} diperbarui ke ${
+          data.user.planTier === 'pro' ? 'Pro' : 'Free'
+        }.`
+      );
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal memperbarui paket.'
+      );
+    } finally {
+      setInspectSaving(false);
+    }
+  };
+
+  const handleSaveInspectWarning = async (clear = false) => {
+    if (!inspectDetail) return;
+    setInspectSaving(true);
+    try {
+      const text = clear ? '' : warningInput.trim();
+      const res = await authFetch(
+        `/api/superadmin/users/${inspectDetail.user.id}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ adminWarning: text }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal memperbarui peringatan.');
+      }
+      setWarningInput(data.user.adminWarning || '');
+      setInspectDetail((prev) =>
+        prev
+          ? {
+              ...prev,
+              user: {
+                ...prev.user,
+                adminWarning: data.user.adminWarning,
+                adminWarningAt: data.user.adminWarningAt,
+              },
+            }
+          : prev
+      );
+      setUsersList((prev) =>
+        prev.map((u) =>
+          u.id === inspectDetail.user.id
+            ? {
+                ...u,
+                adminWarning: data.user.adminWarning,
+                adminWarningAt: data.user.adminWarningAt,
+              }
+            : u
+        )
+      );
+      showToast(
+        'ok',
+        clear
+          ? `Peringatan untuk @${inspectDetail.user.username} dihapus.`
+          : `Peringatan dikirim ke Studio @${inspectDetail.user.username}.`
+      );
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal memperbarui peringatan.'
+      );
+    } finally {
+      setInspectSaving(false);
+    }
+  };
+
+  const handleCleanupClickEvents = async (olderThanDays: number) => {
+    setCleanupBusy(true);
+    try {
+      const res = await authFetch(
+        '/api/superadmin/maintenance/cleanup-events',
+        {
+          method: 'POST',
+          body: JSON.stringify({ olderThanDays }),
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Gagal membersihkan log event.');
+      }
+      setConfirmCleanupDays(null);
+      showToast(
+        'ok',
+        `Berhasil menghapus ${Number(data.deletedCount || 0).toLocaleString(
+          'id-ID'
+        )} baris log event lama (> ${olderThanDays} hari).`
+      );
+      await loadAnalyticsAndLogs(analyticsDays);
+    } catch (err: unknown) {
+      showToast(
+        'err',
+        err instanceof Error ? err.message : 'Gagal membersihkan log event.'
+      );
+    } finally {
+      setCleanupBusy(false);
     }
   };
 
@@ -676,6 +1007,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       'Nama',
       'Email',
       'Peran',
+      'Paket',
       'Terverifikasi',
       'PratinjauBeranda',
       'Dinonaktifkan',
@@ -684,6 +1016,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       'Klik',
       'Subscriber',
       'Pesan',
+      'TerakhirAktif',
       'TanggalGabung',
     ];
     const rows = usersList.map((u) => [
@@ -692,6 +1025,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       `"${(u.displayName || '').replace(/"/g, '""')}"`,
       u.email,
       u.role,
+      isUserProActive(u) ? 'Pro' : 'Free',
       u.isVerified ? 'Ya' : 'Tidak',
       u.isFeatured ? 'Ya' : 'Tidak',
       u.isSuspended ? 'Ya' : 'Tidak',
@@ -700,6 +1034,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
       u.totalClicks,
       u.subscriberCount,
       u.inquiryCount,
+      new Date(u.lastActiveAt || u.createdAt).toISOString(),
       new Date(u.createdAt).toISOString(),
     ]);
     const csv = [header.join(','), ...rows.map((r) => r.join(','))].join('\n');
@@ -794,13 +1129,18 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
   const filterButtons: { id: UserFilter; label: string; count: number }[] = [
     { id: 'all', label: 'Semua', count: usersList.length },
     {
+      id: 'pro',
+      label: 'Paket Pro',
+      count: usersList.filter((u) => isUserProActive(u)).length,
+    },
+    {
       id: 'verified',
       label: 'Terverifikasi',
       count: usersList.filter((u) => u.isVerified).length,
     },
     {
       id: 'featured',
-      label: 'Tampil di Pratinjau',
+      label: 'Pratinjau',
       count: usersList.filter((u) => u.isFeatured).length,
     },
     {
@@ -959,6 +1299,38 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
           </div>
         </div>
 
+        {/* Active Operational Status Banner */}
+        {(settings.maintenanceMode || !settings.registrationOpen) && (
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900">
+            <div className="flex items-center gap-2.5">
+              <Wrench className="w-4 h-4 text-amber-700 shrink-0" />
+              <span>
+                Status Operasional:{' '}
+                {settings.maintenanceMode && (
+                  <strong className="font-semibold">
+                    Mode Pemeliharaan Aktif
+                  </strong>
+                )}
+                {settings.maintenanceMode && !settings.registrationOpen
+                  ? ' · '
+                  : ''}
+                {!settings.registrationOpen && (
+                  <strong className="font-semibold">
+                    Pendaftaran Baru Ditutup
+                  </strong>
+                )}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveTab('curation')}
+              className="px-3 py-1 rounded-lg bg-amber-900/10 hover:bg-amber-900/15 font-semibold text-amber-950 transition-colors"
+            >
+              Kelola Pengaturan
+            </button>
+          </div>
+        )}
+
         {/* KPI Cards */}
         {stats && (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
@@ -971,7 +1343,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                 {stats.totalUsers.toLocaleString('id-ID')}
               </p>
               <p className="text-xs text-stone-500 mt-1 tabular-nums">
-                {stats.totalAdmins} admin · {stats.totalVerified} terverifikasi
+                {stats.totalProUsers} Pro · {stats.totalVerified} terverifikasi
               </p>
             </div>
 
@@ -981,7 +1353,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                 {stats.totalLinks.toLocaleString('id-ID')}
               </p>
               <p className="text-xs text-stone-500 mt-1 tabular-nums">
-                {stats.totalSuspended} akun dinonaktifkan
+                {stats.totalSuspended} nonaktif · {stats.dormantUsers} dormant
               </p>
             </div>
 
@@ -1047,16 +1419,32 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
         {/* TAB 1: PENGGUNA & MODERASI */}
         {activeTab === 'users' && (
           <div className="bg-white border border-stone-200 rounded-2xl p-4 sm:p-5 space-y-4">
-            <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
-              <div className="relative flex-1 max-w-md">
-                <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Cari nama, @username, atau email..."
-                  className="w-full min-h-[42px] pl-10 pr-4 rounded-xl border border-stone-200 text-sm focus:outline-none focus:border-[#141413]"
-                />
+            <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
+              <div className="flex flex-col sm:flex-row gap-2.5 flex-1">
+                <div className="relative flex-1 max-w-md">
+                  <Search className="w-4 h-4 text-stone-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Cari nama, @username, atau email..."
+                    className="w-full min-h-[42px] pl-10 pr-4 rounded-xl border border-stone-200 text-sm focus:outline-none focus:border-[#141413]"
+                  />
+                </div>
+                <select
+                  aria-label="Urutkan pengguna"
+                  value={userSort}
+                  onChange={(e) => setUserSort(e.target.value as UserSort)}
+                  className="min-h-[42px] px-3 rounded-xl border border-stone-200 bg-white text-xs font-medium text-stone-700 focus:outline-none focus:border-[#141413]"
+                >
+                  <option value="newest">Urut: Terbaru</option>
+                  <option value="views">Urut: Views Terbanyak</option>
+                  <option value="clicks">Urut: Klik Terbanyak</option>
+                  <option value="links">Urut: Tautan Terbanyak</option>
+                  <option value="oldest_active">
+                    Urut: Terlama Tidak Aktif
+                  </option>
+                </select>
               </div>
 
               <div className="flex flex-wrap items-center gap-1.5">
@@ -1077,257 +1465,401 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
               </div>
             </div>
 
+            {/* Bulk Selection & Actions Bar */}
+            {filteredUsers.length > 0 && (
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-stone-50 border border-stone-200">
+                <label className="inline-flex items-center gap-2.5 text-xs font-medium text-stone-700 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={
+                      paginatedUsers.length > 0 &&
+                      paginatedUsers.every((u) =>
+                        selectedUserIds.includes(u.id)
+                      )
+                    }
+                    onChange={handleToggleSelectPage}
+                    className="w-4 h-4 rounded border-stone-300 accent-[#141413]"
+                  />
+                  <span>
+                    Pilih semua di halaman ini ({paginatedUsers.length})
+                  </span>
+                  {selectedUserIds.length > 0 && (
+                    <span className="text-[#D97757] font-semibold tabular-nums">
+                      · {selectedUserIds.length} dipilih
+                    </span>
+                  )}
+                </label>
+
+                {selectedUserIds.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={bulkAction}
+                      onChange={(e) => {
+                        setBulkAction(e.target.value as BulkUserAction | '');
+                        setConfirmBulkDelete(false);
+                      }}
+                      className="min-h-[36px] px-3 rounded-lg border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                    >
+                      <option value="">-- Pilih Aksi Massal --</option>
+                      <option value="set_pro">Naikkan ke Paket Pro</option>
+                      <option value="set_free">Turunkan ke Paket Free</option>
+                      <option value="verify">Beri Centang Verifikasi</option>
+                      <option value="unverify">Cabut Verifikasi</option>
+                      <option value="feature">Tampilkan di Pratinjau</option>
+                      <option value="unfeature">Sembunyikan Pratinjau</option>
+                      <option value="suspend">Nonaktifkan Akun</option>
+                      <option value="unsuspend">Aktifkan Akun</option>
+                      <option value="delete">Hapus Akun Permanen</option>
+                    </select>
+                    <button
+                      type="button"
+                      disabled={!bulkAction || bulkBusy}
+                      onClick={handleBulkAction}
+                      className={`min-h-[36px] px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-colors disabled:opacity-45 whitespace-nowrap ${
+                        confirmBulkDelete
+                          ? 'bg-red-600 text-white hover:bg-red-700'
+                          : 'bg-[#141413] text-white hover:bg-stone-800'
+                      }`}
+                    >
+                      {bulkBusy
+                        ? 'Memproses...'
+                        : confirmBulkDelete
+                        ? `Konfirmasi Hapus (${selectedUserIds.length})`
+                        : 'Terapkan'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedUserIds([]);
+                        setConfirmBulkDelete(false);
+                      }}
+                      className="min-h-[36px] px-2.5 py-1 rounded-lg border border-stone-200 bg-white text-xs text-stone-600 hover:bg-stone-100"
+                    >
+                      Batal
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
             {filteredUsers.length === 0 ? (
               <div className="py-10 text-center text-sm text-stone-500">
                 Tidak ada pengguna yang cocok dengan filter atau pencarian ini.
               </div>
             ) : (
-              <div className="divide-y divide-stone-100">
-                {filteredUsers.map((u) => {
-                  const isSelf = u.uid === user.uid;
-                  const isBusy = busyUserId === u.id;
-                  const avatarBroken = brokenAvatars[u.id] || !u.avatarUrl;
-                  return (
-                    <div
-                      key={u.id}
-                      className={`py-4 flex flex-col xl:flex-row xl:items-center justify-between gap-4 ${
-                        u.isSuspended ? 'opacity-65' : ''
-                      }`}
-                    >
-                      <div className="flex items-start gap-3.5 min-w-0">
-                        <div className="w-11 h-11 rounded-full overflow-hidden border border-stone-200 bg-stone-100 shrink-0 flex items-center justify-center">
-                          {!avatarBroken ? (
-                            <img
-                              src={u.avatarUrl}
-                              alt={u.displayName}
-                              referrerPolicy="no-referrer"
-                              onError={() =>
-                                setBrokenAvatars((prev) => ({
-                                  ...prev,
-                                  [u.id]: true,
-                                }))
-                              }
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <UserIcon className="w-5 h-5 text-stone-400" />
-                          )}
-                        </div>
-
-                        <div className="min-w-0 space-y-1">
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-sm font-semibold text-[#141413] truncate">
-                              {u.displayName}
-                            </span>
-                            {u.isVerified && (
-                              <BadgeCheck
-                                className="w-4 h-4 text-sky-500 shrink-0"
-                                aria-label="Terverifikasi"
+              <>
+                <div className="divide-y divide-stone-100">
+                  {paginatedUsers.map((u) => {
+                    const isSelf = u.uid === user.uid;
+                    const isBusy = busyUserId === u.id;
+                    const isPro = isUserProActive(u);
+                    const isSelected = selectedUserIds.includes(u.id);
+                    const avatarBroken = brokenAvatars[u.id] || !u.avatarUrl;
+                    return (
+                      <div
+                        key={u.id}
+                        className={`py-4 flex flex-col xl:flex-row xl:items-center justify-between gap-4 ${
+                          u.isSuspended ? 'opacity-65' : ''
+                        }`}
+                      >
+                        <div className="flex items-start gap-3 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => handleToggleSelectUser(u.id)}
+                            aria-label={`Pilih @${u.username}`}
+                            className="mt-3 w-4 h-4 rounded border-stone-300 accent-[#141413] shrink-0"
+                          />
+                          <div className="w-11 h-11 rounded-full overflow-hidden border border-stone-200 bg-stone-100 shrink-0 flex items-center justify-center">
+                            {!avatarBroken ? (
+                              <img
+                                src={u.avatarUrl}
+                                alt={u.displayName}
+                                referrerPolicy="no-referrer"
+                                onError={() =>
+                                  setBrokenAvatars((prev) => ({
+                                    ...prev,
+                                    [u.id]: true,
+                                  }))
+                                }
+                                className="w-full h-full object-cover"
                               />
-                            )}
-                            <span className="text-xs font-medium text-stone-500">
-                              · {u.role === 'admin' ? 'Super Admin' : 'User'}
-                            </span>
-                            {isSelf && (
-                              <span className="text-xs font-medium text-[#D97757]">
-                                · Akun Anda
-                              </span>
-                            )}
-                            {u.isSuspended && (
-                              <span className="text-xs font-semibold text-red-600">
-                                · Dinonaktifkan
-                              </span>
+                            ) : (
+                              <UserIcon className="w-5 h-5 text-stone-400" />
                             )}
                           </div>
 
-                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-stone-500">
-                            <button
-                              type="button"
-                              onClick={() => onNavigate(`/${u.username}`)}
-                              className="font-mono text-[#141413] hover:underline inline-flex items-center gap-1"
-                            >
-                              <span>@{u.username}</span>
-                              <ExternalLink className="w-3 h-3" />
-                            </button>
-                            <span aria-hidden="true">·</span>
-                            <span className="truncate max-w-[220px]">
-                              {u.email}
-                            </span>
-                          </div>
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="text-sm font-semibold text-[#141413] truncate">
+                                {u.displayName}
+                              </span>
+                              {u.isVerified && (
+                                <BadgeCheck
+                                  className="w-4 h-4 text-sky-500 shrink-0"
+                                  aria-label="Terverifikasi"
+                                />
+                              )}
+                              <span
+                                className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide ${
+                                  isPro
+                                    ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                                    : 'bg-stone-100 text-stone-600 border border-stone-200'
+                                }`}
+                              >
+                                {isPro ? 'Pro' : 'Free'}
+                              </span>
+                              <span className="text-xs font-medium text-stone-500">
+                                · {u.role === 'admin' ? 'Super Admin' : 'User'}
+                              </span>
+                              {isSelf && (
+                                <span className="text-xs font-medium text-[#D97757]">
+                                  · Akun Anda
+                                </span>
+                              )}
+                              {u.isSuspended && (
+                                <span className="text-xs font-semibold text-red-600">
+                                  · Dinonaktifkan
+                                </span>
+                              )}
+                              {u.adminWarning && (
+                                <span
+                                  title={u.adminWarning}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-red-50 border border-red-200 text-[10px] font-semibold text-red-700"
+                                >
+                                  <AlertTriangle className="w-3 h-3" />
+                                  Peringatan Aktif
+                                </span>
+                              )}
+                            </div>
 
-                          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-stone-500 tabular-nums">
-                            <span>{u.linkCount} tautan</span>
-                            <span>
-                              {u.profileViews.toLocaleString('id-ID')} kunj
-                            </span>
-                            <span>
-                              {u.totalClicks.toLocaleString('id-ID')} klik
-                            </span>
-                            <span>{u.subscriberCount} email</span>
-                            <span>{u.inquiryCount} pesan</span>
-                            <span>
-                              Gabung{' '}
-                              {new Date(u.createdAt).toLocaleDateString(
-                                'id-ID',
-                                {
+                            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-stone-500">
+                              <button
+                                type="button"
+                                onClick={() => onNavigate(`/${u.username}`)}
+                                className="font-mono text-[#141413] hover:underline inline-flex items-center gap-1"
+                              >
+                                <span>@{u.username}</span>
+                                <ExternalLink className="w-3 h-3" />
+                              </button>
+                              <span aria-hidden="true">·</span>
+                              <span className="truncate max-w-[220px]">
+                                {u.email}
+                              </span>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-stone-500 tabular-nums">
+                              <span>{u.linkCount} tautan</span>
+                              <span>
+                                {u.profileViews.toLocaleString('id-ID')} kunj
+                              </span>
+                              <span>
+                                {u.totalClicks.toLocaleString('id-ID')} klik
+                              </span>
+                              <span>{u.subscriberCount} email</span>
+                              <span>{u.inquiryCount} pesan</span>
+                              <span>
+                                Aktif{' '}
+                                {new Date(
+                                  u.lastActiveAt || u.createdAt
+                                ).toLocaleDateString('id-ID', {
                                   day: 'numeric',
                                   month: 'short',
                                   year: 'numeric',
-                                }
-                              )}
-                            </span>
+                                })}
+                              </span>
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => openInspectModal(u.id)}
-                          className="min-h-[36px] px-3 py-1.5 rounded-xl border border-stone-200 bg-stone-50 text-xs font-medium text-[#141413] hover:bg-stone-100 inline-flex items-center gap-1.5 whitespace-nowrap"
-                        >
-                          <Link2 className="w-3.5 h-3.5" />
-                          <span>Inspeksi</span>
-                        </button>
+                        <div className="flex flex-wrap items-center gap-2 shrink-0 pl-7 xl:pl-0">
+                          <button
+                            type="button"
+                            onClick={() => openInspectModal(u.id)}
+                            className="min-h-[36px] px-3 py-1.5 rounded-xl border border-stone-200 bg-stone-50 text-xs font-medium text-[#141413] hover:bg-stone-100 inline-flex items-center gap-1.5 whitespace-nowrap"
+                          >
+                            <Link2 className="w-3.5 h-3.5" />
+                            <span>Inspeksi</span>
+                          </button>
 
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() =>
-                            handleUpdateUser(
-                              u,
-                              { isVerified: !u.isVerified },
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() =>
+                              handleUpdateUser(
+                                u,
+                                { isVerified: !u.isVerified },
+                                u.isVerified
+                                  ? `Centang biru @${u.username} dicabut.`
+                                  : `@${u.username} berhasil diverifikasi.`
+                              )
+                            }
+                            className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-50 whitespace-nowrap ${
                               u.isVerified
-                                ? `Centang biru @${u.username} dicabut.`
-                                : `@${u.username} berhasil diverifikasi.`
-                            )
-                          }
-                          className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-50 whitespace-nowrap ${
-                            u.isVerified
-                              ? 'bg-sky-50 border-sky-200 text-sky-800 hover:bg-sky-100'
-                              : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
-                          }`}
-                        >
-                          <BadgeCheck className="w-3.5 h-3.5" />
-                          <span>
-                            {u.isVerified ? 'Terverifikasi' : 'Verifikasi'}
-                          </span>
-                        </button>
+                                ? 'bg-sky-50 border-sky-200 text-sky-800 hover:bg-sky-100'
+                                : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
+                            }`}
+                          >
+                            <BadgeCheck className="w-3.5 h-3.5" />
+                            <span>
+                              {u.isVerified ? 'Terverifikasi' : 'Verifikasi'}
+                            </span>
+                          </button>
 
-                        <button
-                          type="button"
-                          disabled={isBusy}
-                          onClick={() =>
-                            handleUpdateUser(
-                              u,
-                              { isFeatured: !u.isFeatured },
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() =>
+                              handleUpdateUser(
+                                u,
+                                { isFeatured: !u.isFeatured },
+                                u.isFeatured
+                                  ? `@${u.username} disembunyikan dari pratinjau beranda.`
+                                  : `@${u.username} ditampilkan di pratinjau beranda.`
+                              )
+                            }
+                            className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-50 whitespace-nowrap ${
                               u.isFeatured
-                                ? `@${u.username} disembunyikan dari pratinjau beranda.`
-                                : `@${u.username} ditampilkan di pratinjau beranda.`
-                            )
-                          }
-                          className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-50 whitespace-nowrap ${
-                            u.isFeatured
-                              ? 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
-                              : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
-                          }`}
-                        >
-                          <Star className="w-3.5 h-3.5" />
-                          <span>
-                            {u.isFeatured
-                              ? 'Tampil di Pratinjau'
-                              : 'Tampilkan di Pratinjau'}
-                          </span>
-                        </button>
+                                ? 'bg-amber-50 border-amber-200 text-amber-800 hover:bg-amber-100'
+                                : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
+                            }`}
+                          >
+                            <Star className="w-3.5 h-3.5" />
+                            <span>
+                              {u.isFeatured
+                                ? 'Tampil di Pratinjau'
+                                : 'Tampilkan di Pratinjau'}
+                            </span>
+                          </button>
 
-                        <button
-                          type="button"
-                          disabled={isBusy || isSelf}
-                          onClick={() =>
-                            handleUpdateUser(
-                              u,
-                              { role: u.role === 'admin' ? 'user' : 'admin' },
+                          <button
+                            type="button"
+                            disabled={isBusy || isSelf}
+                            onClick={() =>
+                              handleUpdateUser(
+                                u,
+                                { role: u.role === 'admin' ? 'user' : 'admin' },
+                                u.role === 'admin'
+                                  ? `@${u.username} diubah menjadi User.`
+                                  : `@${u.username} diangkat menjadi Super Admin.`
+                              )
+                            }
+                            className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-45 whitespace-nowrap ${
                               u.role === 'admin'
-                                ? `@${u.username} diubah menjadi User.`
-                                : `@${u.username} diangkat menjadi Super Admin.`
-                            )
-                          }
-                          className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-45 whitespace-nowrap ${
-                            u.role === 'admin'
-                              ? 'bg-[#141413] border-[#141413] text-white hover:bg-stone-800'
-                              : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
-                          }`}
-                        >
-                          <Shield className="w-3.5 h-3.5" />
-                          <span>
-                            {u.role === 'admin'
-                              ? 'Super Admin'
-                              : 'Jadikan Admin'}
-                          </span>
-                        </button>
+                                ? 'bg-[#141413] border-[#141413] text-white hover:bg-stone-800'
+                                : 'bg-white border-stone-200 text-stone-700 hover:bg-stone-50'
+                            }`}
+                          >
+                            <Shield className="w-3.5 h-3.5" />
+                            <span>
+                              {u.role === 'admin'
+                                ? 'Super Admin'
+                                : 'Jadikan Admin'}
+                            </span>
+                          </button>
 
-                        <button
-                          type="button"
-                          disabled={isBusy || isSelf}
-                          onClick={() =>
-                            handleUpdateUser(
-                              u,
-                              { isSuspended: !u.isSuspended },
+                          <button
+                            type="button"
+                            disabled={isBusy || isSelf}
+                            onClick={() =>
+                              handleUpdateUser(
+                                u,
+                                { isSuspended: !u.isSuspended },
+                                u.isSuspended
+                                  ? `Akun @${u.username} diaktifkan kembali.`
+                                  : `Akun @${u.username} dinonaktifkan sementara.`
+                              )
+                            }
+                            className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-45 whitespace-nowrap ${
                               u.isSuspended
-                                ? `Akun @${u.username} diaktifkan kembali.`
-                                : `Akun @${u.username} dinonaktifkan sementara.`
-                            )
-                          }
-                          className={`min-h-[36px] px-3 py-1.5 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-45 whitespace-nowrap ${
-                            u.isSuspended
-                              ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
-                              : 'bg-white border-stone-200 text-stone-700 hover:bg-red-50 hover:text-red-700 hover:border-red-200'
-                          }`}
-                        >
-                          {u.isSuspended ? (
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                          ) : (
-                            <Ban className="w-3.5 h-3.5" />
-                          )}
-                          <span>
-                            {u.isSuspended ? 'Aktifkan' : 'Nonaktifkan'}
-                          </span>
-                        </button>
+                                ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
+                                : 'bg-white border-stone-200 text-stone-700 hover:bg-red-50 hover:text-red-700 hover:border-red-200'
+                            }`}
+                          >
+                            {u.isSuspended ? (
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            ) : (
+                              <Ban className="w-3.5 h-3.5" />
+                            )}
+                            <span>
+                              {u.isSuspended ? 'Aktifkan' : 'Nonaktifkan'}
+                            </span>
+                          </button>
 
-                        {!isSelf &&
-                          (confirmDeleteId === u.id ? (
-                            <div className="inline-flex items-center gap-1.5">
+                          {!isSelf &&
+                            (confirmDeleteId === u.id ? (
+                              <div className="inline-flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleDeleteUser(u)}
+                                  className="min-h-[36px] px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-50 whitespace-nowrap"
+                                >
+                                  Ya, Hapus
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteId(null)}
+                                  className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-stone-200 text-xs text-stone-600 hover:bg-stone-50"
+                                >
+                                  Batal
+                                </button>
+                              </div>
+                            ) : (
                               <button
                                 type="button"
-                                disabled={isBusy}
-                                onClick={() => handleDeleteUser(u)}
-                                className="min-h-[36px] px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-50 whitespace-nowrap"
+                                onClick={() => setConfirmDeleteId(u.id)}
+                                aria-label={`Hapus akun @${u.username}`}
+                                className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-stone-200 text-stone-500 hover:bg-red-50 hover:text-red-700 hover:border-red-200 transition-colors"
                               >
-                                Ya, Hapus
+                                <Trash2 className="w-3.5 h-3.5" />
                               </button>
-                              <button
-                                type="button"
-                                onClick={() => setConfirmDeleteId(null)}
-                                className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-stone-200 text-xs text-stone-600 hover:bg-stone-50"
-                              >
-                                Batal
-                              </button>
-                            </div>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => setConfirmDeleteId(u.id)}
-                              aria-label={`Hapus akun @${u.username}`}
-                              className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-stone-200 text-stone-500 hover:bg-red-50 hover:text-red-700 hover:border-red-200 transition-colors"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          ))}
+                            ))}
+                        </div>
                       </div>
+                    );
+                  })}
+                </div>
+
+                {/* Pagination Bar */}
+                {totalPages > 1 && (
+                  <div className="pt-3 border-t border-stone-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-stone-600">
+                    <span className="tabular-nums">
+                      Menampilkan {(safePage - 1) * USERS_PER_PAGE + 1}–
+                      {Math.min(
+                        safePage * USERS_PER_PAGE,
+                        filteredUsers.length
+                      )}{' '}
+                      dari {filteredUsers.length} akun
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        disabled={safePage <= 1}
+                        onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                        className="min-h-[34px] px-3 py-1 rounded-lg border border-stone-200 bg-white hover:bg-stone-50 disabled:opacity-40 inline-flex items-center gap-1"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" />
+                        <span>Sebelumnya</span>
+                      </button>
+                      <span className="px-2.5 font-medium tabular-nums">
+                        Hal {safePage} / {totalPages}
+                      </span>
+                      <button
+                        type="button"
+                        disabled={safePage >= totalPages}
+                        onClick={() =>
+                          setCurrentPage((p) => Math.min(totalPages, p + 1))
+                        }
+                        className="min-h-[34px] px-3 py-1 rounded-lg border border-stone-200 bg-white hover:bg-stone-50 disabled:opacity-40 inline-flex items-center gap-1"
+                      >
+                        <span>Berikutnya</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
                     </div>
-                  );
-                })}
-              </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
@@ -1849,6 +2381,222 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                   </button>
                 </div>
               </div>
+
+              {/* Kontrol Operasional Darurat & Kuota */}
+              <div className="bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
+                <div className="flex items-center gap-2">
+                  <Wrench className="w-4 h-4 text-[#D97757]" />
+                  <div>
+                    <h2 className="font-display text-base font-bold">
+                      Kontrol Operasional &amp; Kuota Paket Free
+                    </h2>
+                    <p className="text-xs text-stone-500">
+                      Kelola mode pemeliharaan darurat, izin pendaftaran baru, dan batas tautan kreator Free.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-3 pt-1">
+                  <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-stone-50 border border-stone-200">
+                    <div>
+                      <p className="text-xs font-semibold text-[#141413]">
+                        Mode Pemeliharaan (Maintenance Mode)
+                      </p>
+                      <p className="text-[11px] text-stone-500 mt-0.5">
+                        Jika aktif, halaman publik (`/:username`) &amp; beranda menampilkan layar pemeliharaan. Super Admin tetap dapat masuk.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={settings.maintenanceMode}
+                      onClick={() =>
+                        setSettings((prev) => ({
+                          ...prev,
+                          maintenanceMode: !prev.maintenanceMode,
+                        }))
+                      }
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                        settings.maintenanceMode
+                          ? 'bg-red-600'
+                          : 'bg-stone-300'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-xs transition-transform ${
+                          settings.maintenanceMode
+                            ? 'translate-x-5'
+                            : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Pesan Layar Pemeliharaan
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={settings.maintenanceMessage}
+                      onChange={(e) =>
+                        setSettings((prev) => ({
+                          ...prev,
+                          maintenanceMessage: e.target.value,
+                        }))
+                      }
+                      placeholder="Contoh: LokaBio sedang menjalani pemeliharaan sistem terjadwal. Kami akan segera kembali."
+                      className="w-full p-3 rounded-xl border border-stone-200 text-xs resize-none focus:outline-none focus:border-[#141413]"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-stone-50 border border-stone-200">
+                    <div>
+                      <p className="text-xs font-semibold text-[#141413]">
+                        Buka Pendaftaran Akun Baru
+                      </p>
+                      <p className="text-[11px] text-stone-500 mt-0.5">
+                        Jika dimatikan, hanya akun yang sudah terdaftar atau Super Admin yang dapat login ke Studio.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={settings.registrationOpen}
+                      onClick={() =>
+                        setSettings((prev) => ({
+                          ...prev,
+                          registrationOpen: !prev.registrationOpen,
+                        }))
+                      }
+                      className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
+                        settings.registrationOpen
+                          ? 'bg-[#141413]'
+                          : 'bg-stone-300'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-xs transition-transform ${
+                          settings.registrationOpen
+                            ? 'translate-x-5'
+                            : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-stone-600 mb-1">
+                      Maksimal Blok Tautan untuk Paket Free (1–100)
+                    </label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={settings.freeLinkLimit}
+                      onChange={(e) =>
+                        setSettings((prev) => ({
+                          ...prev,
+                          freeLinkLimit: Math.max(
+                            1,
+                            Math.min(100, Number(e.target.value) || 8)
+                          ),
+                        }))
+                      }
+                      className="w-32 min-h-[40px] px-3 rounded-xl border border-stone-200 text-xs font-semibold tabular-nums focus:outline-none focus:border-[#141413]"
+                    />
+                  </div>
+                </div>
+
+                {/* SafeLink Domain Blocklist */}
+                <div className="pt-3 border-t border-stone-100 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-[#D97757]" />
+                    <div>
+                      <h3 className="text-sm font-semibold">
+                        Keamanan Tautan (Domain Blocklist)
+                      </h3>
+                      <p className="text-xs text-stone-500">
+                        Domain atau pola URL terlarang (phishing, judi online, scam). Diblokir otomatis saat kreator menambah/mengubah tautan.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newBlockedDomain}
+                      onChange={(e) =>
+                        setNewBlockedDomain(e.target.value.toLowerCase().trim())
+                      }
+                      placeholder="Contoh: bit.ly/scam atau judol.com"
+                      className="flex-1 min-h-[40px] px-3 rounded-xl border border-stone-200 text-xs font-mono focus:outline-none focus:border-[#141413]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const clean = newBlockedDomain
+                          .trim()
+                          .toLowerCase()
+                          .replace(/^https?:\/\//, '')
+                          .replace(/\/+$/, '');
+                        if (clean.length < 3) return;
+                        if (!settings.blockedDomains.includes(clean)) {
+                          setSettings((prev) => ({
+                            ...prev,
+                            blockedDomains: [...prev.blockedDomains, clean],
+                          }));
+                        }
+                        setNewBlockedDomain('');
+                      }}
+                      className="min-h-[40px] px-3.5 py-1.5 rounded-xl border border-stone-200 bg-stone-50 text-xs font-medium hover:bg-stone-100 inline-flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Tambah</span>
+                    </button>
+                  </div>
+                  {settings.blockedDomains.length === 0 ? (
+                    <p className="text-xs text-stone-400">
+                      Belum ada domain yang diblokir.
+                    </p>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {settings.blockedDomains.map((dom) => (
+                        <button
+                          key={dom}
+                          type="button"
+                          onClick={() =>
+                            setSettings((prev) => ({
+                              ...prev,
+                              blockedDomains: prev.blockedDomains.filter(
+                                (d) => d !== dom
+                              ),
+                            }))
+                          }
+                          title="Klik untuk menghapus dari blocklist"
+                          className="px-2.5 py-1 rounded-lg border border-red-200 bg-red-50 text-xs font-mono text-red-700 hover:bg-red-100 inline-flex items-center gap-1.5"
+                        >
+                          <Lock className="w-3 h-3" />
+                          <span>{dom}</span>
+                          <X className="w-3 h-3" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-end pt-2">
+                  <button
+                    type="button"
+                    disabled={savingSettings}
+                    onClick={() => handleSavePlatformSettings()}
+                    className="min-h-[40px] px-5 py-2 rounded-xl bg-[#D97757] text-white text-xs font-semibold hover:bg-[#c56647] disabled:opacity-50"
+                  >
+                    {savingSettings
+                      ? 'Menyimpan...'
+                      : 'Simpan Pengaturan Platform'}
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -1982,17 +2730,191 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
               </div>
             </div>
 
-            {/* Audit Log Aktivitas Admin */}
-            <div className="bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
-              <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-[#D97757]" />
+            {/* Akun Dormant & Pemeliharaan Database */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+              <div className="lg:col-span-7 bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
                 <div>
                   <h2 className="font-display text-base font-bold">
-                    Audit Log Aktivitas Admin
+                    Kreator Tidak Aktif (&gt; 30 Hari)
                   </h2>
                   <p className="text-xs text-stone-500">
-                    Rekam jejak kronologis setiap tindakan moderasi dan perubahan pengaturan platform.
+                    Daftar akun yang belum melakukan login atau pembaruan lebih dari 30 hari terakhir.
                   </p>
+                </div>
+
+                {!analytics || analytics.dormantCreators.length === 0 ? (
+                  <p className="text-xs text-stone-500 py-4">
+                    Tidak ada akun tidak aktif dalam 30 hari terakhir.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-stone-100">
+                    {analytics.dormantCreators.map((dc) => (
+                      <div
+                        key={dc.id}
+                        className="py-2.5 flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-semibold text-[#141413] truncate">
+                            {dc.displayName}{' '}
+                            <span className="font-mono font-normal text-stone-500">
+                              @{dc.username}
+                            </span>
+                          </p>
+                          <p className="text-[11px] text-stone-500 tabular-nums">
+                            Terakhir aktif{' '}
+                            {new Date(dc.lastActiveAt).toLocaleDateString(
+                              'id-ID'
+                            )}{' '}
+                            · {dc.linkCount} tautan ·{' '}
+                            {dc.profileViews.toLocaleString('id-ID')} kunj
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => openInspectModal(dc.id)}
+                          className="min-h-[32px] px-2.5 py-1 rounded-lg border border-stone-200 bg-stone-50 text-xs font-medium hover:bg-stone-100 shrink-0"
+                        >
+                          Inspeksi
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="lg:col-span-5 bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-[#D97757]" />
+                  <div>
+                    <h2 className="font-display text-base font-bold">
+                      Pemeliharaan Database Event
+                    </h2>
+                    <p className="text-xs text-stone-500">
+                      Pangkas baris log klik/kunjungan lama agar kueri tetap ringan.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="p-4 rounded-xl bg-stone-50 border border-stone-200">
+                  <p className="text-xs text-stone-500">
+                    Total Baris Log Event Tersimpan
+                  </p>
+                  <p className="font-display text-2xl font-bold tabular-nums mt-1">
+                    {(analytics?.totalClickEvents || 0).toLocaleString('id-ID')}{' '}
+                    baris
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-stone-600">
+                    Hapus log klik &amp; kunjungan yang lebih lama dari:
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {[30, 90, 180].map((d) =>
+                      confirmCleanupDays === d ? (
+                        <div key={d} className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={cleanupBusy}
+                            onClick={() => handleCleanupClickEvents(d)}
+                            className="min-h-[36px] px-3 py-1.5 rounded-xl bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-50"
+                          >
+                            {cleanupBusy
+                              ? 'Menghapus...'
+                              : `Ya, Hapus > ${d} Hari`}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmCleanupDays(null)}
+                            className="min-h-[36px] px-2.5 py-1.5 rounded-xl border border-stone-200 text-xs text-stone-600 hover:bg-stone-50"
+                          >
+                            Batal
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          key={d}
+                          type="button"
+                          disabled={cleanupBusy}
+                          onClick={() => setConfirmCleanupDays(d)}
+                          className="min-h-[36px] px-3 py-1.5 rounded-xl border border-stone-200 bg-white text-xs font-medium text-stone-700 hover:bg-red-50 hover:text-red-700 hover:border-red-200 transition-colors"
+                        >
+                          &gt; {d} Hari
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Audit Log Aktivitas Admin */}
+            <div className="bg-white border border-stone-200 rounded-2xl p-5 sm:p-6 space-y-4">
+              <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-[#D97757]" />
+                  <div>
+                    <h2 className="font-display text-base font-bold">
+                      Audit Log Aktivitas Admin
+                    </h2>
+                    <p className="text-xs text-stone-500">
+                      Rekam jejak kronologis setiap tindakan moderasi dan perubahan pengaturan platform.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <select
+                    aria-label="Filter tipe aksi audit log"
+                    value={logActionFilter}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setLogActionFilter(val);
+                      loadAuditLogs(val, logSearchQuery);
+                    }}
+                    className="min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                  >
+                    <option value="ALL">Semua Aksi</option>
+                    <option value="UPDATE_USER">UPDATE_USER</option>
+                    <option value="BULK_USER_ACTION">BULK_USER_ACTION</option>
+                    <option value="DELETE_USER">DELETE_USER</option>
+                    <option value="MODERATE_LINK">MODERATE_LINK</option>
+                    <option value="DELETE_LINK">DELETE_LINK</option>
+                    <option value="REVIEW_VERIFICATION">
+                      REVIEW_VERIFICATION
+                    </option>
+                    <option value="REVIEW_REPORT">REVIEW_REPORT</option>
+                    <option value="REORDER_FEATURED">REORDER_FEATURED</option>
+                    <option value="UPDATE_PLATFORM_SETTINGS">
+                      UPDATE_PLATFORM_SETTINGS
+                    </option>
+                    <option value="CLEANUP_CLICK_EVENTS">
+                      CLEANUP_CLICK_EVENTS
+                    </option>
+                  </select>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={logSearchQuery}
+                      onChange={(e) => setLogSearchQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          loadAuditLogs(logActionFilter, logSearchQuery);
+                        }
+                      }}
+                      placeholder="Cari @username / detail..."
+                      className="min-h-[38px] px-3 rounded-xl border border-stone-200 text-xs focus:outline-none focus:border-[#141413]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        loadAuditLogs(logActionFilter, logSearchQuery)
+                      }
+                      className="min-h-[38px] px-3 py-1.5 rounded-xl bg-[#141413] text-white text-xs font-medium hover:bg-stone-800 whitespace-nowrap"
+                    >
+                      Filter
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -2002,7 +2924,7 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                 </div>
               ) : auditLogs.length === 0 ? (
                 <div className="py-8 text-center text-xs text-stone-500">
-                  Belum ada catatan aktivitas admin yang terekam.
+                  Tidak ada catatan aktivitas admin yang sesuai filter.
                 </div>
               ) : (
                 <div className="divide-y divide-stone-100">
@@ -2081,6 +3003,93 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                 </div>
               ) : (
                 <>
+                  {/* Paket & Kuota Kreator */}
+                  <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <Crown className="w-4 h-4 text-amber-700" />
+                      <label className="text-xs font-semibold text-[#141413]">
+                        Paket &amp; Masa Aktif Langganan
+                      </label>
+                    </div>
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <select
+                        value={planTierInput}
+                        onChange={(e) =>
+                          setPlanTierInput(e.target.value as PlanTier)
+                        }
+                        className="min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs font-medium focus:outline-none focus:border-[#141413]"
+                      >
+                        <option value="free">
+                          Paket Free (Maks {settings.freeLinkLimit} tautan)
+                        </option>
+                        <option value="pro">
+                          Paket Pro (Tautan tak terbatas + Hapus Branding)
+                        </option>
+                      </select>
+                      {planTierInput === 'pro' && (
+                        <input
+                          type="date"
+                          value={planExpiresAtInput}
+                          onChange={(e) => setPlanExpiresAtInput(e.target.value)}
+                          title="Kosongkan untuk Pro permanen"
+                          className="min-h-[38px] px-3 rounded-xl border border-stone-200 bg-white text-xs focus:outline-none focus:border-[#141413]"
+                        />
+                      )}
+                      <button
+                        type="button"
+                        disabled={inspectSaving}
+                        onClick={handleSaveInspectPlan}
+                        className="min-h-[38px] px-4 py-1.5 rounded-xl bg-[#141413] text-white text-xs font-medium hover:bg-stone-800 disabled:opacity-45 whitespace-nowrap"
+                      >
+                        Simpan Paket
+                      </button>
+                    </div>
+                    {planTierInput === 'pro' && (
+                      <p className="text-[11px] text-stone-500">
+                        Kosongkan tanggal kedaluwarsa jika ingin memberikan paket Pro tanpa batas waktu.
+                      </p>
+                    )}
+                  </div>
+
+                  {/* Peringatan Khusus Akun */}
+                  <div className="p-4 rounded-xl bg-red-50/60 border border-red-200 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 text-red-600" />
+                        <label className="text-xs font-semibold text-[#141413]">
+                          Peringatan / Notifikasi Khusus ke Studio Pengguna
+                        </label>
+                      </div>
+                      {inspectDetail.user.adminWarning && (
+                        <button
+                          type="button"
+                          disabled={inspectSaving}
+                          onClick={() => handleSaveInspectWarning(true)}
+                          className="text-[11px] font-semibold text-red-700 hover:underline"
+                        >
+                          Hapus Peringatan
+                        </button>
+                      )}
+                    </div>
+                    <textarea
+                      rows={2}
+                      value={warningInput}
+                      onChange={(e) => setWarningInput(e.target.value)}
+                      placeholder="Tulis teguran atau pemberitahuan resmi yang hanya muncul di Studio milik kreator ini..."
+                      className="w-full p-2.5 rounded-xl border border-stone-200 bg-white text-xs resize-none focus:outline-none focus:border-[#141413]"
+                    />
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        disabled={inspectSaving || !warningInput.trim()}
+                        onClick={() => handleSaveInspectWarning(false)}
+                        className="min-h-[34px] px-3.5 py-1 rounded-xl bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-45"
+                      >
+                        Kirim Peringatan
+                      </button>
+                    </div>
+                  </div>
+
                   {/* Force Rename Handle */}
                   <div className="p-4 rounded-xl bg-stone-50 border border-stone-200 space-y-2.5">
                     <label className="block text-xs font-semibold text-[#141413]">
@@ -2133,12 +3142,20 @@ export function AdminPage({ onNavigate }: AdminPageProps) {
                             }`}
                           >
                             <div className="min-w-0 space-y-0.5">
-                              <p className="text-xs font-semibold text-[#141413] truncate">
-                                {l.title}{' '}
-                                <span className="font-normal text-stone-400">
-                                  ({l.linkType})
-                                </span>
-                              </p>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <p className="text-xs font-semibold text-[#141413] truncate">
+                                  {l.title}{' '}
+                                  <span className="font-normal text-stone-400">
+                                    ({l.linkType})
+                                  </span>
+                                </p>
+                                {l.flaggedReason && (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-red-50 border border-red-200 text-[10px] font-semibold text-red-700">
+                                    <ShieldAlert className="w-3 h-3" />
+                                    {l.flaggedReason}
+                                  </span>
+                                )}
+                              </div>
                               {l.url && (
                                 <a
                                   href={l.url}

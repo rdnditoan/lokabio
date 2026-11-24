@@ -1451,19 +1451,25 @@ export function BioLinkRenderer({
       {/* Quiet Footer */}
       <footer className="relative z-10 mt-10 pt-4 text-center">
         {isPreview ? (
-          <span className="text-[11px] font-medium opacity-55">
-            lokabio.id/{profile.username}
-          </span>
+          profile.hideBranding ? null : (
+            <span className="text-[11px] font-medium opacity-55">
+              lokabio.id/{profile.username}
+            </span>
+          )
         ) : (
           <div className="inline-flex items-center justify-center gap-3 text-xs font-medium opacity-65">
-            <button
-              type="button"
-              onClick={onNavigateHome}
-              className="hover:opacity-100 transition-opacity py-2 px-2"
-            >
-              Dibuat dengan LokaBio
-            </button>
-            <span aria-hidden="true">·</span>
+            {!profile.hideBranding && (
+              <>
+                <button
+                  type="button"
+                  onClick={onNavigateHome}
+                  className="hover:opacity-100 transition-opacity py-2 px-2"
+                >
+                  Dibuat dengan LokaBio
+                </button>
+                <span aria-hidden="true">·</span>
+              </>
+            )}
             <button
               type="button"
               onClick={() => {

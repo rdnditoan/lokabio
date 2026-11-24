@@ -17,11 +17,16 @@ import {
   QrCode,
   Search,
   Smartphone,
+  Wrench,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { BioLinkRenderer } from '../components/BioLinkRenderer';
 import { PhoneMockupFrame } from '../components/PhoneMockupFrame';
-import { PublicProfileDTO, THEME_PRESETS } from '../shared/themes';
+import {
+  PublicPlatformStatusDTO,
+  PublicProfileDTO,
+  THEME_PRESETS,
+} from '../shared/themes';
 
 interface LandingPageProps {
   onNavigate: (path: string) => void;
@@ -57,6 +62,8 @@ export function LandingPage({ onNavigate }: LandingPageProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [previewPresetId, setPreviewPresetId] = useState<string | null>(null);
   const [loadingFeatured, setLoadingFeatured] = useState(true);
+  const [platformStatus, setPlatformStatus] =
+    useState<PublicPlatformStatusDTO | null>(null);
 
   // Interactive Hero Username Claim
   const [claimHandle, setClaimHandle] = useState('');
@@ -69,6 +76,12 @@ export function LandingPage({ onNavigate }: LandingPageProps) {
 
   useEffect(() => {
     document.title = 'LokaBio – Platform BioLink Modern & Studio Tema Real-Time';
+    fetch('/api/public/platform-status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setPlatformStatus(data);
+      })
+      .catch(() => {});
     fetch('/api/public/featured')
       .then((res) => (res.ok ? res.json() : { profiles: [] }))
       .then((data) => {
@@ -180,6 +193,43 @@ export function LandingPage({ onNavigate }: LandingPageProps) {
   }, [featured]);
 
   const activePresetId = previewPresetId ?? activeShowcase?.themePreset;
+
+  if (platformStatus?.maintenanceMode) {
+    return (
+      <div className="min-h-screen bg-[#F6F5F1] text-[#141413] flex flex-col items-center justify-center px-4 text-center">
+        <div className="max-w-md w-full bg-white border border-stone-200 rounded-2xl p-8 shadow-xs">
+          <div className="w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto mb-4">
+            <Wrench className="w-6 h-6" />
+          </div>
+          <p className="font-display text-lg font-bold tracking-tight text-[#141413]">
+            LokaBio
+          </p>
+          <h1 className="font-display text-2xl font-bold tracking-tight mt-2 mb-2">
+            Sedang Dalam Pemeliharaan
+          </h1>
+          <p className="text-sm text-stone-600 leading-relaxed mb-6">
+            {platformStatus.maintenanceMessage}
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="min-h-[42px] px-5 py-2 rounded-xl bg-[#141413] text-white text-sm font-medium hover:bg-stone-800 transition-colors"
+            >
+              Coba Muat Ulang
+            </button>
+            <button
+              type="button"
+              onClick={() => onNavigate('/admin')}
+              className="min-h-[42px] px-4 py-2 rounded-xl border border-stone-200 text-xs font-medium text-stone-600 hover:bg-stone-50 transition-colors"
+            >
+              Akses Super Admin
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#F6F5F1] text-[#141413] overflow-x-hidden">

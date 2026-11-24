@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion, Reorder } from 'motion/react';
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   BadgeCheck,
@@ -9,6 +10,7 @@ import {
   Check,
   Copy,
   CopyPlus,
+  Crown,
   Download,
   Eye,
   ExternalLink,
@@ -38,6 +40,7 @@ import {
   Upload,
   User as UserIcon,
   Wallet,
+  Wrench,
   X,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -50,6 +53,7 @@ import {
   AnalyticsSummaryDTO,
   GRADIENT_SWATCHES,
   InquiryDTO,
+  isUserProActive,
   LINK_ICON_OPTIONS,
   LINK_TYPE_OPTIONS,
   PlatformSettingsDTO,
@@ -212,13 +216,21 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
   );
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [mobilePreviewOpen, setMobilePreviewOpen] = useState(false);
-  const [platformNotice, setPlatformNotice] = useState<Pick<
-    PlatformSettingsDTO,
-    | 'announcementEnabled'
-    | 'announcementTitle'
-    | 'announcementMessage'
-    | 'announcementType'
-  > | null>(null);
+  const [platformNotice, setPlatformNotice] = useState<
+    | (Pick<
+        PlatformSettingsDTO,
+        | 'announcementEnabled'
+        | 'announcementTitle'
+        | 'announcementMessage'
+        | 'announcementType'
+      > & {
+        maintenanceMode?: boolean;
+        maintenanceMessage?: string;
+        freeLinkLimit?: number;
+      })
+    | null
+  >(null);
+  const [dismissingWarning, setDismissingWarning] = useState(false);
   const [verificationReq, setVerificationReq] =
     useState<VerificationRequestDTO | null>(null);
   const [verifyFormOpen, setVerifyFormOpen] = useState(false);
@@ -519,6 +531,24 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
     setEditPublishAt(toDatetimeLocalValue(link.publishAt));
     setEditExpireAt(toDatetimeLocalValue(link.expireAt));
     setConfirmDeleteId(null);
+  };
+
+  const handleDismissAdminWarning = async () => {
+    setDismissingWarning(true);
+    try {
+      const res = await authFetch('/api/admin/warning/dismiss', {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error('Gagal menutup peringatan.');
+      setProfile((prev) =>
+        prev ? { ...prev, adminWarning: '', adminWarningAt: null } : prev
+      );
+      showToast('ok', 'Peringatan ditandai sudah dibaca.');
+    } catch {
+      showToast('err', 'Gagal menutup peringatan admin.');
+    } finally {
+      setDismissingWarning(false);
+    }
   };
 
   const handleSaveEditLink = async (linkId: number) => {
@@ -997,6 +1027,16 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
+            <span
+              className={`hidden sm:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${
+                isUserProActive(profile)
+                  ? 'bg-amber-50 border-amber-200 text-amber-800'
+                  : 'bg-stone-100 border-stone-200 text-stone-600'
+              }`}
+            >
+              {isUserProActive(profile) && <Crown className="w-3 h-3 text-amber-600" />}
+              <span>{isUserProActive(profile) ? 'PRO' : 'FREE'}</span>
+            </span>
             {profile.role === 'admin' && (
               <button
                 type="button"
@@ -1079,6 +1119,41 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
               </div>
             </div>
           )}
+        {platformNotice?.maintenanceMode && (
+          <div className="mb-5 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 flex items-start gap-3 text-amber-950">
+            <Wrench className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div className="text-sm min-w-0">
+              <p className="font-semibold">
+                Mode Pemeliharaan Platform Sedang Aktif
+              </p>
+              <p className="text-xs opacity-85 mt-0.5 leading-relaxed">
+                {platformNotice.maintenanceMessage ||
+                  'Halaman profil publik sementara dialihkan ke halaman pemeliharaan oleh Super Admin.'}
+              </p>
+            </div>
+          </div>
+        )}
+        {profile.adminWarning && (
+          <div className="mb-5 rounded-2xl border border-amber-300 bg-amber-50 px-5 py-4 flex items-start justify-between gap-3 text-amber-950">
+            <div className="flex items-start gap-3 min-w-0">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="text-sm min-w-0">
+                <p className="font-semibold">Peringatan dari Super Admin</p>
+                <p className="text-xs text-amber-900 mt-1 leading-relaxed">
+                  {profile.adminWarning}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={dismissingWarning}
+              onClick={handleDismissAdminWarning}
+              className="min-h-[34px] px-3 py-1 rounded-xl border border-amber-300 bg-white text-xs font-medium text-amber-900 hover:bg-amber-100 shrink-0 disabled:opacity-50"
+            >
+              {dismissingWarning ? 'Menutup...' : 'Tandai Dibaca'}
+            </button>
+          </div>
+        )}
         {profile.isSuspended && (
           <div className="mb-6 rounded-2xl border border-red-200 bg-red-50 px-5 py-4 flex items-start gap-3 text-red-900">
             <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
@@ -1151,7 +1226,9 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
                         Tambah Tautan atau Blok
                       </h2>
                       <span className="text-xs text-stone-500 tabular-nums">
-                        {links.length} item tersimpan
+                        {isUserProActive(profile)
+                          ? `${links.length} item tersimpan (Tanpa Batas)`
+                          : `${links.length} / ${platformNotice?.freeLinkLimit ?? 8} item (Akun Free)`}
                       </span>
                     </div>
 
@@ -4182,6 +4259,49 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
                       </button>
                     </div>
 
+                    <div className="flex items-center justify-between pt-3 border-t border-stone-100 gap-4">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-sm font-medium">
+                            Sembunyikan Branding LokaBio
+                          </p>
+                          <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                            PRO
+                          </span>
+                        </div>
+                        <p className="text-xs text-stone-500">
+                          Menghapus teks &ldquo;Dibuat dengan LokaBio&rdquo; di footer halaman profil publik Anda
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        role="switch"
+                        disabled={!isUserProActive(profile)}
+                        aria-checked={Boolean(profile.hideBranding && isUserProActive(profile))}
+                        onClick={() =>
+                          setProfile({
+                            ...profile,
+                            hideBranding: !profile.hideBranding,
+                          })
+                        }
+                        className={`relative inline-flex h-6 w-11 shrink-0 rounded-full border-2 border-transparent transition-colors ${
+                          !isUserProActive(profile)
+                            ? 'bg-stone-200 cursor-not-allowed opacity-60'
+                            : profile.hideBranding
+                            ? 'bg-emerald-600 cursor-pointer'
+                            : 'bg-stone-300 cursor-pointer'
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-xs transition-transform ${
+                            profile.hideBranding && isUserProActive(profile)
+                              ? 'translate-x-5'
+                              : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
                     <div className="flex justify-end pt-2">
                       <button
                         type="button"
@@ -4192,6 +4312,9 @@ export function DashboardPage({ onNavigate }: DashboardPageProps) {
                               seoTitle: profile.seoTitle,
                               seoDescription: profile.seoDescription,
                               utmEnabled: profile.utmEnabled ?? true,
+                              ...(isUserProActive(profile)
+                                ? { hideBranding: Boolean(profile.hideBranding) }
+                                : {}),
                             },
                             'Pengaturan SEO & UTM berhasil disimpan.'
                           )
